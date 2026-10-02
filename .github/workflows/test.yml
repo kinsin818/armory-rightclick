@@ -9,6 +9,9 @@ jobs:
     # 项目本体是 Windows 右键工具（发送到菜单、WinRT OCR、PowerShell），
     # CI 就跑在真实目标平台上，不在 Linux 上假装跨平台。
     runs-on: windows-latest
+    env:
+      # Windows runner 默认 cp1252 控制台，脚本中文输出会 UnicodeEncodeError
+      PYTHONIOENCODING: utf-8
 
     steps:
       - uses: actions/checkout@v4
