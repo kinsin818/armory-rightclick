@@ -280,9 +280,9 @@ def _read_for_model(ctx: dict, limit: int = 0) -> tuple[str, int]:
 
     返回 (正文, 脱敏处数)。
 
-    少了第三道会出真事故：用户右键「总结」自己的 model_config.json 或 key.txt，
-    明文凭据会原样发往第三方模型。这类文件往往很小（key.txt 只有 1.3KB），
-    体积闸门根本拦不住——第 2 轮审计的 P0 就是这条。
+    少了第三道会出真事故：用户右键「总结」自己的凭据或配置文件，明文内容会
+    原样发往第三方模型。这类文件往往只有几 KB，体积闸门根本拦不住，
+    只能靠文件名判据。
     """
     blocked = _gate_size(ctx, MODEL_MAX_BYTES, "送模型")
     if blocked:
