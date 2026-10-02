@@ -1,0 +1,15 @@
+#!/bin/sh
+# 发布前敏感复扫。只在 push 之后才跑，等于把「含真 key 的提交已经进历史」
+# 当成发现时机——所以挂到 commit 上。
+#
+# 启用：git config core.hooksPath .githooks
+# 绕过（确有必要且你确认过改动）：git commit --no-verify
+
+if command -v python >/dev/null 2>&1; then
+    exec python scripts/pre_publish_scan.py
+elif command -v python3 >/dev/null 2>&1; then
+    exec python3 scripts/pre_publish_scan.py
+else
+    echo "pre-commit: 没找到 python，跳过发布前扫描（请手动跑 scripts/pre_publish_scan.py）" >&2
+    exit 0
+fi
