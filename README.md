@@ -75,9 +75,14 @@ ARMORY_LLM_BASE_URL / ARMORY_LLM_API_KEY / ARMORY_LLM_MODEL / ARMORY_LLM_VISION_
 **外发前的五道闸门。** 「总结」不只是读文件就发，它先过：体积上限 → 敏感文件名
 → 是否纯文本 → 读多少 → 内容脱敏。
 
-- 文件名或**所在目录名**像凭据或配置（`key` / `secret` / `token` / `.env` /
-  `*config*.json` / `.pem` / `id_rsa` / `id_ed25519` …）→ **直接拒绝发送**。
-  这类文件往往很小（几 KB），体积闸门根本拦不住，只能靠名字判据。
+- 文件名或**所在目录名**像凭据或配置 → **直接拒绝发送**。这类文件往往很小
+  （几 KB），体积闸门根本拦不住，只能靠名字判据。
+  - 文件名层：`key` / `secret` / `token` / `.env` / `*config*.json` / `.pem` /
+    `id_rsa` / `id_ed25519` …
+  - 目录名层**单独一套**（`secrets\` `keys\` `tokens\` `credential-vault\`
+    `password-store\` `id_rsa\` `.env\`）。目录名没有扩展名，所以上面那批锚着
+    扩展名的规则不能复用——直接套过去会恒不成立，实测只覆盖 6 条里的 3 条。
+  - `vault\` / `myenv\` 这类泛词**故意不收**：拿误拒换召回不划算。
 - 不是敏感文件名、但正文里夹着凭据形状（`sk-` / `AKIA…` / `/ JWT` / `ghp_` /
   `JWT` / Slack `xox*-` / Google `AIza*` / 连接串里的口令 / `-----BEGIN` / `api_key=` …）
   → **抹掉再发**，并告诉你「已抹掉 N 处疑似凭据」。
@@ -165,6 +170,11 @@ integrate.api.nvidia.com`。看得见才谈得上同意。
 `key.png`、`password-manager.png` 会拒发；`prod-keys-screenshot.png`、
 `Snipaste-2.png` 不会——后者靠发送前的通知让你自己看见、自己决定。
 这是一处已知的能力边界，不是"已解决"。
+
+**目录层不收泛词**：`D:\vault\notes.txt`、`D:\myenv\notes.txt` 目前是放行的。
+把 `vault` / `env` 收进名单能多拦一些，但代价是把一批普通目录也拒掉——
+这是取舍，不是漏。反过来，`token-usage\` 这类目录名含凭据词的会被拦（误拒），
+拒绝时会点名命中了哪条规则。
 
 ## 路线
 

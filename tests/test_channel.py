@@ -361,16 +361,49 @@ class Round4Test(unittest.TestCase):
         for name in ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ed448"):
             self.assertIsNotNone(detector.sensitive_reason(name), f"{name} 该被判敏感")
 
-    # ---- M-10：父目录名参与判定 ----
+    # ---- M-10 / M-14：父目录名参与判定 ----
 
     def test_parent_dir_name_is_checked(self):
-        """`…\\password\\notes.txt` 这种「目录说明一切」的文件不该放行。"""
-        self.assertIsNotNone(detector.sensitive_reason(str(Path("password") / "notes.txt")))
-        self.assertIsNotNone(detector.sensitive_reason(str(Path("id_ed25519") / "notes.txt")))
+        """「目录说明一切」的文件不该放行。
+
+        断言必须用**它声称要修的那个例子**。上一版只测 password\\ 和 id_ed25519\\，
+        恰好落在当时唯一能命中的两条规则上，而 D:\\secrets\\notes.txt、D:\\keys\\
+        一路放行——测试全绿，bug 完整（M-14）。
+        """
+        for path in (r"D:\secrets\notes.txt", r"D:\keys\notes.txt",
+                     r"D:\work\dev\tokens\list.csv", r"D:\credential-vault\backup.zip",
+                     r"D:\password-store\a.md", r"D:\id_rsa_stuff\a.md",
+                     r"D:\.env\a.md"):
+            self.assertIsNotNone(detector.sensitive_reason(path), f"{path} 该被拦")
+
+    def test_dir_layer_rule_is_not_anchored_on_extension(self):
+        """目录名没有扩展名，套文件层那批锚扩展名的规则恒不成立——这是 M-14 的根因。"""
+        for path in (r"D:\secrets\notes.txt", r"D:\keys\notes.txt"):
+            self.assertIsNotNone(detector.sensitive_reason(path), path)
+        # 文件层这三条锚着扩展名，目录层表里不该有它们
+        self.assertIsNone(detector.sensitive_reason(r"D:\config\a.md"))
+
+    def test_vault_like_dirs_are_left_alone_on_purpose(self):
+        """vault / env 这类泛词不收：拿误拒换召回不划算。已知取舍，不是漏。"""
+        self.assertIsNone(detector.sensitive_reason(r"D:\vault\notes.txt"))
+        self.assertIsNone(detector.sensitive_reason(r"D:\myenv\notes.txt"))
 
     def test_parent_dir_check_is_one_level_only(self):
-        """只查一层。逐级向上会把 `…\\keys\\` 之下的所有东西全拒，误报不可控。"""
-        self.assertIsNone(detector.sensitive_reason(str(Path("keys") / "deep" / "notes.txt")))
+        """只查一层。逐级向上会把 `…\\keys\\` 之下的所有东西全拒，误报不可控。
+
+        反例必须是「同名目录放在更近一层会命中」的那种，否则这条断言等于什么
+        都没验证——上一版拿 keys\\deep\\notes.txt 当反例，可当时 keys\\notes.txt
+        也是 None（正则失效而非层数设计），于是把 bug 固化成了预期行为。
+        """
+        self.assertIsNotNone(detector.sensitive_reason(r"D:\keys\notes.txt"),
+                             "同一层就该拦，否则下面的反例没有意义")
+        self.assertIsNone(detector.sensitive_reason(r"D:\keys\deep\notes.txt"),
+                          "隔一层就不查了")
+
+    def test_normal_dir_names_are_not_mistaken_for_secrets(self):
+        for path in (r"D:\monkey\notes.md", r"D:\turkey\a.md", r"D:\keyword\a.md",
+                     r"D:\projects\main.py", r"D:\tests\fixtures\a.txt"):
+            self.assertIsNone(detector.sensitive_reason(path), f"{path} 不该被拦")
 
     # ---- M-2 余项：像 .env 却一条都没抹掉 ----
 
