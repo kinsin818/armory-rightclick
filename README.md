@@ -1,7 +1,8 @@
-# Armory 右键增强 · v0.3（审计返修版）
+# Armory 右键增强 · v0.3（两轮审计返修）
 
 对应文档：`D:\codex\11-Armory-右键增强.md`
-v0.1 通道 · v0.2 接模型 · v0.3 按 `audit-report-armory-rightclick-v0.2.md` 返修
+v0.1 通道 → v0.2 接模型 → v0.3 按两轮审计返修（提交 `246d602`）
+审计：`audit-report-armory-rightclick-v0.2.md` + 第 2 轮整改核验
 
 ---
 
@@ -18,58 +19,76 @@ v0.1 通道 · v0.2 接模型 · v0.3 按 `audit-report-armory-rightclick-v0.2.m
 
 ---
 
-## v0.3 修了什么
+## 第 2 轮新增 P0：外发路径没接凭据防护
 
-第三方审计（2026-10-02）判定：渠道 A（SendTo 自用）可用但有隐私自伤，
-渠道 B（HTTP 总线）不可开启，渠道 C（仓库外发）不可外发。缺陷 P0×2 · P1×6 · P2×11。
-本次逐条返修：
+**这是第 1 轮返修自己捅的娄子。** 我把敏感文件名单和脱敏只接在「本地留存」那条路上，
+「外发」那条一条没接。`_read_for_model` 只有体积闸门和二进制判定，于是：
+
+- 右键「总结」自己的 `model_config.json` → 明文 API key 进请求体，还返回 `status: ok`
+- `D:\新建文件夹\key.txt` 只有 1.3KB，**远在 2MB 体积闸门内**，右键「总结」它
+  等于把 15 条 nvapi key 整个发给第三方
+
+**修法（双保险）：**
+
+1. 敏感文件名（`key` / `secret` / `token` / `.env` / `config.json` / `.pem` / `id_rsa` …）
+   → **直接拒绝发送**，明确说明为什么。脱敏可能漏，拒绝不会。
+2. 非敏感文件名但内容里夹着凭据形状（`nvapi-` / `sk-` / `-----BEGIN` / `api_key=` …）
+   → **抹掉再发**，并在结果里写明「已抹掉 N 处疑似凭据」
+
+现在 `_read_for_model` 是五道闸门：体积 → 敏感文件名 → 是否纯文本 → 读多少 → 内容脱敏。
+
+---
+
+## 三处回归（都是我这轮改出来的）
+
+| 回归 | 真相 | 修法 |
+|---|---|---|
+| outline「分块读」峰值内存 121.6MB → **153.6MB** | `chunks` 攒完再 `join`，等于全文进内存还多一份 | 改成逐行流式扫描，单行超 1MB 跳过匹配。**实测 20.4MB 输入：0.8 秒、峰值 ~0MB** |
+| `install_sendto` 校验了 label 漏了 action | action 键同样被拼进 `$lnk.Arguments` | 加 `^[a-z][a-z0-9_]*$` 白名单 |
+| 「默认拒绝」只对声明了 `risk` 的动作成立 | `meta.get("risk", "none")` —— 没写 risk 键就当 none 放行 | 改成 `meta.get("risk")`，缺失得 `None` 照样拒绝；`kind` 未知也拒绝 |
+
+## 两条 P1
+
+- **688 行返修一行没提交**（HEAD 还在 v0.1 而 README 自称 v0.3）→ 已提交 `246d602`
+- **`LOCALAPPDATA` 缺失时 evidence 回落 `<仓库>/evidence`**，而 `.gitignore` 既没有
+  `evidence/`、死规则 `evidencetmp/` 还占着位——P0-2 原地复活的通道没堵
+  → 回落到 `~/.armory/evidence`，`.gitignore` 补 `evidence/` 删死规则
+
+---
+
+## 第 1 轮修复（已通过第 2 轮核验）
 
 ### P0
 
-**P0-1 HTTP 总线是无鉴权的「任意本地文件读取」原语** —— 已修
+**P0-1 HTTP 总线是无鉴权的「任意本地文件读取」原语** —— 已修且实测到位
 
-`serve()` 现在默认拒绝启动：无 `ARMORY_ALLOWED_ROOTS` 直接退出。启动时强制校验
-`X-Armory-Token`（常量时间比较）、`Host` ∈ 回环地址、`Origin` 同源，请求体上限 1MB，
-换 `ThreadingHTTPServer`。信任模型分成两档：
+| 探针 | 结果 |
+|---|---|
+| 无 token / 错 token | 401 |
+| 伪造 Host | 403 |
+| 坏 Origin | 403 |
+| 白名单外路径 | 403 |
+| 超大请求体 | 413 |
+| 非数字 Content-Length | 400 |
+| 未知动作 | 400 |
+| 不设 `ARMORY_ALLOWED_ROOTS` 时 `serve()` | rc=1 拒启 |
 
-| 调用方 | trusted | 路径限制 |
-|---|---|---|
-| SendTo（用户本人右键） | True | 不做限制 |
-| HTTP 网络调用 | False | 必须落在白名单根目录下 |
+信任模型分两档：`route(trusted=True)` 给 SendTo（用户本人右键，不做路径限制），
+`False` 给网络调用（强制白名单）。
 
-README 已撤下「随手 `python router.py 8791`」的写法。
+**P0-2 evidence 明文留存并被 git 跟踪** —— 已修
 
-**P0-2 evidence 明文留存文件内容并被 git 跟踪** —— 已修
+默认落 `%LOCALAPPDATA%\Armory\evidence`；`preview` 默认关闭，开了也要过敏感文件
+黑名单 + 凭据脱敏 + 200 字符上限；18 份历史 evidence 已迁出仓库（逐字段等值、
+sha256 自校验仍成立）。
 
-- 默认落盘位置移出仓库 → `%LOCALAPPDATA%\Armory\evidence\`
-- `preview` 默认关闭（`ARMORY_CAPTURE_PREVIEW=1` 才开），开了也要过敏感文件黑名单
-  并做凭据形状脱敏（`nvapi-` / `sk-` / `-----BEGIN` / `api_key=` …），上限 200 字符
-- 已把 18 份历史 evidence 迁出仓库，`git rm -r --cached evidence/`
-- `datetime.now()` 合并成一次调用（原来跨秒时文件名与体内时间戳对不上）
+> ⚠️ **git 历史里仍有 15 份含正文片段的 evidence**（在 `6203c0d` 里）。
+> 当前无 remote，暂无外泄；**加 remote 或打包外发前必须先 `git filter-repo` 清理**。
 
-> ⚠️ **历史里仍有 15 份含正文片段的 evidence**。当前仓库无 remote，暂无外泄；
-> **一旦要加 remote 或打包外发，必须先做 `git filter-repo` 历史清理**，
-> 单靠 .gitignore 只防继续恶化。
+### P1 / P2
 
-### P1
-
-| 编号 | 问题 | 修法 |
-|---|---|---|
-| P1-1 | Permission Gate 是黑名单，`risk` 字段没人读 | 改成默认拒绝：`risk != none` 或列入 `require_confirm` 一律拦下，且 gate 早于上下文抽取 |
-| P1-2 | 33MB 输入 → 121MB 峰值内存 | 加 `size_bytes` 闸门（local ≤50MB、model ≤2MB），分块读 |
-| P1-3 | 剪贴板失败也报「已写入」 | 查 `returncode`，失败就说失败 |
-| P1-4 | PDF/Word 二进制当文本送付费模型 | 发送前用 NUL 采样判据卡住，明确报不支持 |
-| P1-5 | 零测试零 CI | 补 `tests/test_channel.py`，19 条断言，0.37 秒跑完不联网 |
-| P1-6 | 快捷方式钉死可被外部清理的 Python 路径 | 安装时告警；找不到 `pythonw` 明确报错（不再退回 `python.exe` 闪黑框） |
-
-### P2（11 条）
-
-vision MIME 按真实后缀（不再恒写 `image/png`）+ 只对 PNG/JPEG/WEBP/GIF 开 describe；
-HTTP 状态码语义（400/403/501 不再一律 200）；空 paths 不再掐连接；`Content-Length`
-校验与上限；install 脚本 PowerShell 注入加固（单引号成对转义 + 标签白名单）；
-`--with-stub` 文案改对；临时 ps1 随机名且用完即删；`info` 补可读摘要并删掉
-从未实现的 SHA-256 描述；`egress` 字段标注外发动作；动作表与模型配置加缓存；
-`lstat` 复用。
+gate 默认拒绝、体积闸门、剪贴板查返回码、二进制不送模型、测试、解释器路径告警；
+vision MIME 按后缀、HTTP 状态码语义、install 注入面、info 补摘要、缓存与 lstat 复用。
 
 ---
 
@@ -77,81 +96,82 @@ HTTP 状态码语义（400/403/501 不再一律 200）；空 paths 不再掐连�
 
 | 文件 | 职责 |
 |---|---|
-| `detector.py` | 对象类型检测 + 上下文抽取（preview 默认关 + 脱敏） |
+| `detector.py` | 类型检测 + 抽取；`is_sensitive_path` / `redact` 供两条路共用 |
 | `actions.json` | 动作表 + 高危清单 + `egress` 外发标注 |
-| `model.py` | 模型接入层，OpenAI 兼容，零依赖 |
-| `model_config.json` | 模型配置（**含 API key，已 gitignore**） |
-| `ocr.ps1` | Windows 自带 OCR，本地跑不联网 |
-| `executor.py` | 执行层。local / model / stub 三类分明，带大小闸门 |
-| `router.py` | 通道核心 `route()` + 加固后的 HTTP 总线 |
-| `cli.py` | SendTo 入口，结果三件套 |
+| `model.py` | 模型层，OpenAI 兼容，零依赖 |
+| `model_config.json` | 模型配置（**含 key，已 gitignore**） |
+| `ocr.ps1` | Windows 自带 OCR，本地不联网 |
+| `executor.py` | 执行层，五道闸门 |
+| `router.py` | 通道核心 + 加固后的 HTTP 总线 |
+| `cli.py` | SendTo 入口 |
 | `evidence.py` | 落盘（仓库外）+ SHA-256 + `elapsed_ms` |
-| `tests/test_channel.py` | 19 条自检断言 |
+| `tests/test_channel.py` | **28 条断言，0.47 秒，不联网** |
 
 ## 用法
 
-资源管理器选中对象 → 右键 → **发送到** → `Armory · ...`（10 个动作）
+选中对象 → 右键 → **发送到** → `Armory · ...`（10 个动作）
 
 ```bash
 python install_sendto.py             # 装所有已实现动作
 python uninstall_sendto.py           # 卸载，不留注册表
-python -m unittest discover -s tests # 自检
+python -m unittest discover -s tests # 28 条自检
 ```
 
-HTTP 总线（**默认不可用**，必须先设白名单）：
+HTTP 总线（**默认不可用**）：
 
 ```bash
-set ARMORY_ALLOWED_ROOTS=D:\Armory
-python router.py 8791                # 启动时打印 token 文件位置
+set ARMORY_ALLOWED_ROOTS=D:\Armory\rightclick   # 别照抄成整个 D:\Armory
+python router.py 8791
 ```
 
-## 实测耗时（有留痕，不是自述）
+## 渠道判定（审计口径）
 
-每条 evidence 现在记 `elapsed_ms`，性能断言可复证：
+| 渠道 | 判定 |
+|---|---|
+| A. 本机 SendTo 自用 | **可用**。别对配置/密钥文件点「总结」「翻译」——现在会拒绝，但别习惯性去试 |
+| B. HTTP 总线 | **可开启**，白名单别开太大 |
+| C. 仓库外发 | **不可外发**。历史里 15 份 evidence 待清理 |
 
-| 动作 | 耗时 | 验证结果 |
-|---|---|---|
-| 总结 | 约 3–15 秒 | 抓到文档要点，中文干净 |
-| 翻译 | 数十秒（长文） | docstring 译英文、代码标识符原样保留 |
-| 图片描述 | 约 10 秒 | 认出三档套餐与 `$20/$50/$90`，输出中文 |
-| OCR | 数秒 | 本地引擎，英文可用；**精度一般**（`services`→`servlces`） |
-| 其余 6 个 | <1 秒 | 纯本地 |
+## 实测耗时（evidence 里记 `elapsed_ms`，可复证）
 
-模型选型（NVIDIA NIM 81 个在架模型逐个实测）：
-主模型 `openai/gpt-oss-20b`，视觉 `meta/llama-3.2-11b-vision-instruct` + 回译中文。
+| 动作 | 耗时 |
+|---|---|
+| 总结 | 约 3–15 秒 |
+| 翻译 | 数十秒（长文） |
+| 图片描述 | 约 10 秒（视觉模型出英文 + 回译中文） |
+| OCR | 数秒，本地引擎，**精度一般**（`services`→`servlces`） |
+| 其余 6 个 | <1 秒 |
+
+模型：`openai/gpt-oss-20b` + `meta/llama-3.2-11b-vision-instruct`（NVIDIA NIM，
+81 个在架模型逐个实测选出；原文档推荐的 `llama-3.3-nemotron-super-49b` 已下架 410）。
 
 ## 踩过的坑
 
-1. **推理模型的 token 预算陷阱。** `reasoning_content`（思考）会先吃掉几百 token，
-   `max_tokens` 给小了 → 思考完了但 `content` 还空。**绝不能拿 `reasoning_content`
-   顶替**，否则整段思考过程当成答案端给用户。现在只认 `content`，为空则
-   `max_tokens` ×3 重试，仍空就明确报错。
-2. **短问题选不出模型。** `gpt-oss-20b` 短问答 3 秒干净，长输入才暴露问题。
-   选型必须拿真实长度的输入测。
-3. **PowerShell 5.1 只认带 BOM 的 UTF-8**（`utf-8-sig`），否则中文文件名乱码。
-4. **配置数据是潜在的注入入口。** 动作标签会被拼进 PowerShell 字符串和文件名，
-   必须做白名单，不能假设它永远是良性的。
+1. **推理模型的 token 预算陷阱。** `reasoning_content`（思考）先吃掉几百 token，
+   `max_tokens` 给小了 → 想完了但 `content` 还空。**绝不能拿 `reasoning_content` 顶替**。
+2. **短问题选不出模型。** 必须拿真实长度的输入测。
+3. **配置数据是潜在注入入口。** 动作 label 和 action 键都会被拼进 PowerShell 字符串，
+   两个都要白名单。
+4. **修一个面别忘了另一条路。** 这次就是：本地留存加了防护，外发那条没加，
+   结果外发反而成了最大的漏点。
+5. **"分块读"不等于流式。** 攒 chunks 再 join 比直接 read 还费内存。要真流式就逐行迭代。
+6. PowerShell 5.1 只认带 BOM 的 UTF-8（`utf-8-sig`）。
 
 ## 真相边界
 
-**已真机验证：** 上表全部动作；19 条自检断言通过；证据落 `%LOCALAPPDATA%`；
-敏感文件（含 `model_config.json`）抽不到 preview；凭据形状会被脱敏；
-被拒绝的动作不留正文快照；HTTP 无白名单拒绝启动。
+**已验证：** 28 条断言通过；敏感文件拒绝外发、内容凭据脱敏后发送；
+gate 拦住缺 `risk`/`kind` 的动作；outline 20.4MB 输入峰值 ~0MB；
+HTTP 八项加固实测达标；evidence 不回落仓库。
 
-**仍未接线（status=stub）：** `audit`（缺 GOLink 通道）
+**仍 stub：** `audit`（缺 GOLink 通道）
 
-**Permission Gate：** `rename` 及任何 `risk != none` 的动作一律拒绝。
-`egress: true` 只标注不拦截——外发是那几个动作的存在意义，但动作表里如实写明。
+**未实机验证：** 系统通知弹窗（GUI 断言不了）
 
-**未实机验证：** 系统通知弹窗（GUI 断言不了，脚本确实调用了）。
-
-**未修复（需要用户决策）：** git 历史里 15 份含正文的 evidence。当前无 remote 不急，
-外发前必须清理。
+**待用户决策：** git 历史里 15 份含正文 evidence 是否 `filter-repo` 清理
 
 ## 下一步
 
-1. **等你用顺了再说** —— 现在右键工具真能用，先攒真实使用反馈
+1. **等你用顺了再说** —— 先攒真实使用反馈
 2. 接 GOLink 让 `audit` 转正、`rename` 补确认流程
-3. **换壳（IExplorerCommand）**：风险未验证——微软只说 `desktop5:Verb` 最低 17763，
-   没保证 Win10 19041 的 Explorer 会实例化它。动手前先做最小验证包探路，不赌
+3. **换壳（IExplorerCommand）**：风险未验证，动手前先做最小验证包探路，不赌
 4. 剥离非系统右键对象：「选中文本」归 IN 输入法，「网页内容」归 Dory 扩展
