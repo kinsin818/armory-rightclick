@@ -7,6 +7,9 @@
 """
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import os
 import sys
 import tempfile
@@ -23,6 +26,15 @@ import evidence  # noqa: E402
 import install_sendto  # noqa: E402
 import model  # noqa: E402
 import router  # noqa: E402
+
+
+def load_scanner():
+    """按路径加载发布扫描脚本。它不在包里，不能 import，只能这样取。"""
+    spec = importlib.util.spec_from_file_location(
+        "pre_publish_scan", ROOT / "scripts" / "pre_publish_scan.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class ChannelTest(unittest.TestCase):
@@ -282,6 +294,8 @@ class ChannelTest(unittest.TestCase):
             "github": "tok = ghp_16C7e42F8b0a4e1f9c3d5a7b6e8f0a1c2d3e4f5a",
             "jwt": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123",
             "conn": "db = mysql://root:Tr0ub4dor3@10.0.0.5/prod",
+            "slack": "bot = xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
+            "google": "gkey = AIzaSyD-1234567890abcdefghijklmnopqrstu",
         }
         for name, line in cases.items():
             red, n = detector.redact(line)
@@ -320,6 +334,153 @@ class ChannelTest(unittest.TestCase):
             t2 = router.ensure_token()
             self.assertEqual(t1, t2)
             self.assertGreaterEqual(len(t1), 32)
+
+
+class Round4Test(unittest.TestCase):
+    """第 4 轮审计的 6 条 P2。都是精修级，但每条都有一个真实事故在背后。"""
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.tmp = Path(cls._tmp.name)
+        os.environ["ARMORY_LLM_BASE_URL"] = "http://127.0.0.1:9/v1"
+        os.environ["ARMORY_LLM_API_KEY"] = "CANARY-FAKE-KEY"
+        os.environ["ARMORY_LLM_MODEL"] = "fake-model"
+        model.load_config(force=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+        for k in ("ARMORY_LLM_BASE_URL", "ARMORY_LLM_API_KEY", "ARMORY_LLM_MODEL"):
+            os.environ.pop(k, None)
+        model.load_config(force=True)
+
+    # ---- M-9：现代 ssh 私钥名 ----
+
+    def test_modern_ssh_key_names_are_sensitive(self):
+        """名单曾只有 ^id_rsa，id_ed25519 靠内容层兜住——兜得住是运气，不是设计。"""
+        for name in ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ed448"):
+            self.assertIsNotNone(detector.sensitive_reason(name), f"{name} 该被判敏感")
+
+    # ---- M-10：父目录名参与判定 ----
+
+    def test_parent_dir_name_is_checked(self):
+        """`…\\password\\notes.txt` 这种「目录说明一切」的文件不该放行。"""
+        self.assertIsNotNone(detector.sensitive_reason(str(Path("password") / "notes.txt")))
+        self.assertIsNotNone(detector.sensitive_reason(str(Path("id_ed25519") / "notes.txt")))
+
+    def test_parent_dir_check_is_one_level_only(self):
+        """只查一层。逐级向上会把 `…\\keys\\` 之下的所有东西全拒，误报不可控。"""
+        self.assertIsNone(detector.sensitive_reason(str(Path("keys") / "deep" / "notes.txt")))
+
+    # ---- M-2 余项：像 .env 却一条都没抹掉 ----
+
+    def test_env_shaped_content_without_hits_is_flagged(self):
+        """无标签的随机值正则无从判定，那就如实说「可能没覆盖」，别假装干净。"""
+        text = "db_host = 10.0.0.5\ndb_user = armory_admin\nendpoint = https://x.example\n"
+        self.assertEqual(detector.redact(text)[1], 0, "这三行本就不该被识别成凭据")
+        self.assertIn("KEY=VALUE", detector.env_shape_hint(text, 0))
+        self.assertEqual(detector.env_shape_hint(text, 1), "", "抹掉过就不必再提示")
+        self.assertEqual(detector.env_shape_hint("就是一段普通文字\n", 0), "")
+
+    # ---- M-8：外发之前要让用户看见 ----
+
+    def test_egress_notice_names_file_size_and_host(self):
+        p = self.tmp / "notes.txt"
+        p.write_text("x" * 2048, encoding="utf-8")
+        note = cli._egress_notice([str(p)])
+        self.assertIn("即将上传", note)
+        self.assertIn("notes.txt", note)
+        self.assertIn("2.0 KB", note)
+        self.assertIn("127.0.0.1", note, "发给谁必须写出来")
+
+    def test_egress_action_notifies_before_running(self):
+        p = self.tmp / "notes.txt"
+        p.write_text("hello", encoding="utf-8")
+        calls: list[str] = []
+        with mock.patch.object(cli, "notify", lambda _t, x: calls.append(x)), \
+             mock.patch.object(router, "route",
+                               lambda *a, **k: {"status": "ok",
+                                               "result": {"message": "done"},
+                                               "evidence": {}}):
+            cli.main(["cli", "summarize", str(p)])
+        self.assertTrue(calls)
+        self.assertIn("即将上传", calls[0], "外发动作第一条通知必须是「要发什么发给谁」")
+
+    # ---- M-4 漏项：文件夹也该有回执 ----
+
+    def test_folder_action_gets_progress_notice(self):
+        """判定曾写 os.path.isfile，于是大目录跑 index 永远拿不到回执。"""
+        small = self.tmp / "small_dir"
+        small.mkdir()
+        (small / "a.txt").write_text("x", encoding="utf-8")
+        self.assertFalse(cli._is_slow([str(small)]), "小目录不必打扰用户")
+
+        big = self.tmp / "big_dir"
+        big.mkdir()
+        for i in range(8):
+            (big / f"f{i}.txt").write_text("", encoding="utf-8")
+        with mock.patch.object(cli, "SLOW_DIR_ENTRIES", 5):
+            self.assertTrue(cli._is_slow([str(big)]), "大目录遍历最像卡死，必须发回执")
+
+    # ---- M-11：发布扫描不许把真凭据回显到 stdout ----
+
+    def test_scanner_masks_credential_hits(self):
+        pps = load_scanner()
+        self.assertEqual(pps.MASKED_KINDS, {"真实凭据形状"})
+        self.assertNotIn("QWERTYUIOPASDFGHJKLZXCVBNM1234",
+                         pps._mask("nvapi-QWERTYUIOPASDFGHJKLZXCVBNM1234"))
+
+    def test_scanner_never_echoes_secret_to_stdout(self):
+        pps = load_scanner()
+        secret = "nvapi-QWERTYUIOPASDFGHJKLZXCVBNM1234"
+        (self.tmp / "leak.md").write_text(f"key = {secret}\n", encoding="utf-8")
+        pps.ROOT, pps.tracked_files = self.tmp, lambda: (["leak.md"], True)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = pps.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("leak.md", buf.getvalue(), "定位信息要留")
+        self.assertNotIn(secret, buf.getvalue(), "真凭据不许进终端回滚缓冲")
+
+    # ---- M-12：hash 规则要双向 ----
+
+    def test_scanner_catches_hash_before_or_after_keyword(self):
+        """前瞻只覆盖 hash 在关键词之前，中文语序里关键词在前才是常态。"""
+        pps = load_scanner()
+        (self.tmp / "doc.md").write_text("上一轮审计的提交号 6203c0d5 已被替换\n",
+                                         encoding="utf-8")
+        (self.tmp / "clean.md").write_text("这是一行普通文字，没有十六进制串\n",
+                                           encoding="utf-8")
+        pps.ROOT, pps.tracked_files = self.tmp, lambda: (["doc.md", "clean.md"], True)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = pps.main()
+        self.assertEqual(rc, 1, "关键词在 hash 之前的写法也要抓到")
+        self.assertIn("内部提交 hash", buf.getvalue())
+        self.assertNotIn("clean.md", buf.getvalue(), "别把普通文字当提交号")
+
+    # ---- M-13：整改指引要说对场景 ----
+
+    def test_scanner_guidance_matches_scenario(self):
+        """无 git 的解包目录里给「git rm --cached」，等于给了一句废话。"""
+        pps = load_scanner()
+        (self.tmp / "model_config.json").write_text('{"api_key": "x"}', encoding="utf-8")
+        pps.ROOT = self.tmp
+
+        pps.tracked_files = lambda: (["model_config.json"], False)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            pps.main()
+        self.assertNotIn("git rm --cached", buf.getvalue(), "没有 git 就不该给 git 指令")
+        self.assertIn("删掉", buf.getvalue())
+
+        pps.tracked_files = lambda: (["model_config.json"], True)
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            pps.main()
+        self.assertIn("git rm --cached", buf2.getvalue())
 
 
 if __name__ == "__main__":

@@ -28,20 +28,25 @@
 
 | 动作 | 类型 | 说明 |
 |---|---|---|
-| 查看信息 / 复制 SHA-256 / 复制路径列表 | 本地 | 不联网，<1 秒 |
-| 提取代码结构 / 读取图片元信息 / 生成目录索引 | 本地 | 不联网，<1 秒 |
+| 查看信息 / 复制 SHA-256 / 复制路径列表 | 本地 | 不联网 |
+| 提取代码结构 / 读取图片元信息 / 生成目录索引 | 本地 | 不联网；大文件 / 大目录先弹「正在处理」回执 |
 | OCR 识别文字 | 本地 | 用 Windows 自带 OCR 引擎，不联网不花钱 |
-| 总结 / 翻译 | 模型 | 需配置模型端点 |
-| 生成图片描述 | 模型 | 需配置视觉模型 |
+| 总结 / 翻译 | 模型 | 会把正文发往第三方模型，发送前弹通知说明发什么、发给谁 |
+| 生成图片描述 | 模型 | 同上；图片无法脱敏，整张上传 |
 
 ```bash
 python install_sendto.py      # 装进「发送到」菜单
 python uninstall_sendto.py    # 卸载，不留注册表
-python -m unittest discover -s tests          # 33 条自检，约 0.5 秒，不联网
+python -m unittest discover -s tests          # 44 条自检，不联网
 python scripts/pre_publish_scan.py            # 发布前敏感复扫
 ```
 
 CI 会在每次 push / PR 上跑这两条（`.github/workflows/test.yml`，Windows 环境）。
+想在本机 commit 时就跑扫描而不是等 push 之后：
+
+```bash
+git config core.hooksPath .githooks    # 挂上 pre-commit；确需绕过时 git commit --no-verify
+```
 
 ## 安装
 
@@ -70,18 +75,27 @@ ARMORY_LLM_BASE_URL / ARMORY_LLM_API_KEY / ARMORY_LLM_MODEL / ARMORY_LLM_VISION_
 **外发前的五道闸门。** 「总结」不只是读文件就发，它先过：体积上限 → 敏感文件名
 → 是否纯文本 → 读多少 → 内容脱敏。
 
-- 文件名像凭据或配置（`key` / `secret` / `token` / `.env` / `*config*.json` /
-  `.pem` / `id_rsa`）→ **直接拒绝发送**。这类文件往往很小（几 KB），
-  体积闸门根本拦不住，只能靠文件名判据。
-- 不是敏感文件名、但正文里夹着凭据形状（`sk-` / `AKIA…` / JWT / `ghp_` /
-  连接串里的口令 / `-----BEGIN` / `api_key=` …）→ **抹掉再发**，
-  并告诉你「已抹掉 N 处疑似凭据」。
+- 文件名或**所在目录名**像凭据或配置（`key` / `secret` / `token` / `.env` /
+  `*config*.json` / `.pem` / `id_rsa` / `id_ed25519` …）→ **直接拒绝发送**。
+  这类文件往往很小（几 KB），体积闸门根本拦不住，只能靠名字判据。
+- 不是敏感文件名、但正文里夹着凭据形状（`sk-` / `AKIA…` / `/ JWT` / `ghp_` /
+  `JWT` / Slack `xox*-` / Google `AIza*` / 连接串里的口令 / `-----BEGIN` / `api_key=` …）
+  → **抹掉再发**，并告诉你「已抹掉 N 处疑似凭据」。
+- 正文长得像 `.env`（多行 `KEY=VALUE`）却一条都没抹掉 → 结果里附一句
+  「可能没覆盖到」。无标签的随机值正则本就无法判定，与其假装干净地发出去，
+  不如把不确定性交给你。
 - **图片是特例**：文本能局部脱敏，PNG 只能整张上传。所以「生成图片描述」
   对命中敏感名单的图**直接拒发**，而不是脱敏后发送。
 
 名单用「词紧贴扩展名」判定而不是子串匹配——`monkey.md`（菜谱）和
 `token-usage.csv`（用量统计）不该被当成凭据挡掉。误拒比漏放更伤信任。
 拒绝时会说明命中了哪条规则，让你知道怎么绕过而不是猜。
+
+**外发动作先弹通知，说明「什么、多大、发给谁」。** 这不是提示音，是控制点：
+敏感名单按"命名的自觉性"工作，`prod-keys-screenshot.png`、`微信截图_20261003.png`
+这种名字它抓不到（词必须紧贴扩展名）。文本路还有内容脱敏兜底，图片路没有——
+名单堵不上，就让用户在东西出门之前看见 `即将上传 xxx.png（1.2 MB） →
+integrate.api.nvidia.com`。看得见才谈得上同意。
 
 **Permission Gate 是默认拒绝，不是黑名单。** `risk != none` 的动作一律拦下；
 **连 `risk` 字段都没写的动作也拦下**（`meta.get("risk")` 得到 `None`，照样拒绝）。
@@ -108,7 +122,7 @@ ARMORY_LLM_BASE_URL / ARMORY_LLM_API_KEY / ARMORY_LLM_MODEL / ARMORY_LLM_VISION_
 | `router.py` | 通道核心 `route()` + 加固后的 HTTP 总线 |
 | `cli.py` | 入口，结果三件套（落证据 + 剪贴板 + 通知） |
 | `evidence.py` | 落盘（仓库外）+ SHA-256 + 耗时 |
-| `tests/test_channel.py` | 28 条自检，约 0.5 秒，不联网 |
+| `tests/test_channel.py` | 44 条自检，不联网，模型层一律 mock |
 
 ## 踩过的坑
 
@@ -128,6 +142,13 @@ ARMORY_LLM_BASE_URL / ARMORY_LLM_API_KEY / ARMORY_LLM_MODEL / ARMORY_LLM_VISION_
 6. **PowerShell 5.1 只认带 BOM 的 UTF-8**（`utf-8-sig`），否则中文文件名乱码。
 7. **重写 git 历史前先备份工作树**，且备份要排除 `.git`——否则把要清理的内容
    又复制了一份。
+8. **别把墙钟秒数写成性能指标。** 同一条代码路径、同一个 33MB 文件，三次实测
+   4.42s / 5.73s / 0.90s——本机 I/O 与负载抖动可达 5 倍，秒数不具备可复证性。
+   能写的是内存峰值（三次都是 0.2MB）这种确定量，其余写成量级。
+9. **加一条判据要检查"反过来的写法"能不能过。** 提交 hash 的检出规则写成前瞻
+   `(?=.*(?:提交|commit))`，只覆盖 hash 在关键词之前；而中文语序里
+   「上一轮的提交号 X 已被替换」恰恰是关键词在前——漏的正是常态那一种。
+   （本仓库这条规则后来又把文档里举例用的 hash 抓了一次，算它尽职。）
 
 ## 真相边界
 
@@ -139,6 +160,11 @@ ARMORY_LLM_BASE_URL / ARMORY_LLM_API_KEY / ARMORY_LLM_MODEL / ARMORY_LLM_VISION_
 
 **OCR 精度**：用的是 Windows 自带引擎，免费、不联网，但精度一般
 （实测把 `services` 识别成 `servlces`）。要高精度需接专业 OCR 服务。
+
+**图片外发的敏感名单召回有限**：它按文件名的"命名自觉性"工作。
+`key.png`、`password-manager.png` 会拒发；`prod-keys-screenshot.png`、
+`Snipaste-2.png` 不会——后者靠发送前的通知让你自己看见、自己决定。
+这是一处已知的能力边界，不是"已解决"。
 
 ## 路线
 
