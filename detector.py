@@ -67,6 +67,27 @@ _SENSITIVE_RULES: list[tuple[str, str]] = [
     ("文件名含 password / passwd", r"(passwd|password)"),
 ]
 
+# 目录名单单独一套，不能复用上面那批（第 5 轮 M-14）。
+#
+# 踩过一次：把文件名单直接套到父目录名上，实测 6 条只覆盖住 3 条——
+# `(keys?|secrets?|tokens?|credentials?)\.[^.]+$`、`config.*\.json$`、
+# `\.(pem|p12|pfx|key)$` 这三条都锚着扩展名，而**目录名没有扩展名**，
+# 套过去恒不成立。于是 `D:\secrets\notes.txt`、`D:\keys\notes.txt` 一路放行，
+# 而代码、docstring、提交说明、测试四处都写着"父目录名也查"。
+#
+# 所以这里不锚扩展名，只认凭据词本身。代价是 `token-usage\` 这类目录会被拦
+# （目录名里有凭据词），换来 `credential-vault\` 能被拦住——可解释，拒绝时会
+# 点名命中了哪条。
+#
+# 不收 vault / env 这类泛词：那是拿误拒换召回，不划算。因此
+# `D:\vault\notes.txt` 仍是放行状态，这是**已知取舍**，不是漏。
+_DIR_SENSITIVE_RULES: list[tuple[str, str]] = [
+    ("目录名含凭据词或口令词（key / secret / token / credential / password）",
+     r"(^|[-_.])(keys?|secrets?|tokens?|credentials?|passwords?|passwd)([-_.]|$)"),
+    ("目录名以 .env 开头", r"^\.env"),
+    ("目录名是 ssh 私钥（id_rsa / id_ed25519…）", r"^id_(rsa|dsa|ecdsa|ed25519|ed448)"),
+]
+
 # 正文里的凭据形状。召回不完美，但常见类型要覆盖：
 # 第 3 轮实测 7/11，漏掉的是 AWS AKIA、JWT、GitHub token、数据库连接串；
 # 第 4 轮补上 Slack xox* 与 Google AIza*。
@@ -194,16 +215,22 @@ def sensitive_reason(target: str) -> str | None:
     第 3 轮又发现：图片外发那条路同样没接，而图片是唯一无法脱敏的输入。
 
     除 basename 外也查**直接父目录名**（第 4 轮 M-10）：v0.4 为解掉误拒改成只
-    查 basename，代价是 `D:\\vault\\notes.txt` 这种「目录说明一切」的文件放行。
+    查 basename，代价是 `D:\\secrets\\notes.txt` 这种「目录说明一切」的文件放行。
+    目录名走 `_DIR_SENSITIVE_RULES`，不是这一批——那批规则锚着扩展名，套到
+    目录层恒不成立。
+
     只查一层，不逐级向上——逐级会把 `…\\keys\\` 之下的所有东西全拒，误报不可控。
     """
     p = Path(target)
-    for where, name in (("文件名", p.name), ("所在目录名", p.parent.name)):
-        if not name:
-            continue
-        for reason, pattern in _SENSITIVE_RULES:
-            if re.search(pattern, name, re.IGNORECASE):
-                return f"{where}命中：{reason}"
+    for reason, pattern in _SENSITIVE_RULES:
+        if re.search(pattern, p.name, re.IGNORECASE):
+            return f"文件名命中：{reason}"
+
+    parent = p.parent.name
+    if parent:
+        for reason, pattern in _DIR_SENSITIVE_RULES:
+            if re.search(pattern, parent, re.IGNORECASE):
+                return f"所在目录名命中：{reason}"
     return None
 
 
