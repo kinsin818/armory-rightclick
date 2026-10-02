@@ -62,17 +62,21 @@ _SENSITIVE_RULES: list[tuple[str, str]] = [
      r"(^|[-_.])(keys?|secrets?|tokens?|credentials?)\.[^.]+$"),
     ("文件名形如 *config*.json", r"config.*\.json$"),
     ("扩展名是私钥或证书（.pem / .p12 / .pfx / .key）", r"\.(pem|p12|pfx|key)$"),
-    ("文件名是 ssh 私钥（id_rsa…）", r"^id_rsa"),
+    ("文件名是 ssh 私钥（id_rsa / id_ed25519 / id_ecdsa…）",
+     r"^id_(rsa|dsa|ecdsa|ed25519|ed448)"),
     ("文件名含 password / passwd", r"(passwd|password)"),
 ]
 
 # 正文里的凭据形状。召回不完美，但常见类型要覆盖：
-# 第 3 轮实测 7/11，漏掉的是 AWS AKIA、JWT、GitHub token、数据库连接串。
+# 第 3 轮实测 7/11，漏掉的是 AWS AKIA、JWT、GitHub token、数据库连接串；
+# 第 4 轮补上 Slack xox* 与 Google AIza*。
 _SECRET_RE = re.compile(
     r"(nvapi-[A-Za-z0-9_\-]+"
     r"|sk-[A-Za-z0-9_\-]{8,}"
     r"|\bAKIA[0-9A-Z]{16}\b"                                        # AWS access key
     r"|\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}\b"        # GitHub token
+    r"|\bxox[abpsr]-[A-Za-z0-9\-]{10,}"                             # Slack token
+    r"|\bAIza[0-9A-Za-z_\-]{30,}\b"                                 # Google API key
     r"|\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\.?[A-Za-z0-9_\-]*"  # JWT
     r"|[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{4,}@"                  # 连接串里的口令
     r"|-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
@@ -80,6 +84,11 @@ _SECRET_RE = re.compile(
     r"\s*[:=]\s*\S+)",
     re.IGNORECASE,
 )
+
+# 「长得像 .env 但一条都没抹掉」的形状。值够长、有 KEY= 形状，但 Key 名不在
+# 凭据词表里（db、dsn、session…）——正则无从判断它是不是秘密。
+_ENV_LINE_RE = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*\S{8,}\s*$", re.MULTILINE)
+_ENV_HINT_MIN_LINES = 3
 
 PREVIEW_MAX_CHARS = 200
 LINE_COUNT_MAX_BYTES = 5 << 20  # 超过就不数行数，免得右键卡住
@@ -183,12 +192,35 @@ def sensitive_reason(target: str) -> str | None:
     model_config.json 会把明文 key 发给第三方模型。
 
     第 3 轮又发现：图片外发那条路同样没接，而图片是唯一无法脱敏的输入。
+
+    除 basename 外也查**直接父目录名**（第 4 轮 M-10）：v0.4 为解掉误拒改成只
+    查 basename，代价是 `D:\\vault\\notes.txt` 这种「目录说明一切」的文件放行。
+    只查一层，不逐级向上——逐级会把 `…\\keys\\` 之下的所有东西全拒，误报不可控。
     """
-    name = Path(target).name
-    for reason, pattern in _SENSITIVE_RULES:
-        if re.search(pattern, name, re.IGNORECASE):
-            return reason
+    p = Path(target)
+    for where, name in (("文件名", p.name), ("所在目录名", p.parent.name)):
+        if not name:
+            continue
+        for reason, pattern in _SENSITIVE_RULES:
+            if re.search(pattern, name, re.IGNORECASE):
+                return f"{where}命中：{reason}"
     return None
+
+
+def env_shape_hint(text: str, redacted: int) -> str:
+    """「像 .env，但一条都没抹掉」时返回一句提示，否则空串。
+
+    脱敏靠凭据形状认人，而无标签的随机值（`db = 8f3a…`）本就无从判定。
+    与其假装干净地发出去，不如把「有 N 行 KEY=VALUE 形状，而一条都没识别成
+    凭据」说给用户——该不该发是他判断，不是正则判断。
+    """
+    if redacted:
+        return ""
+    n = len(_ENV_LINE_RE.findall(text))
+    if n < _ENV_HINT_MIN_LINES:
+        return ""
+    return (f"正文里有 {n} 行形如 KEY=VALUE 的配置，但没有一行被识别为已知凭据"
+            f"形状，脱敏可能没覆盖到（无标签的随机值本就无法判定）。")
 
 
 def is_sensitive_path(target: str) -> bool:
