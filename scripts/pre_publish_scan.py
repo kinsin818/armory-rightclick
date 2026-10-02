@@ -56,6 +56,11 @@ def main() -> int:
     targets = sorted(set(files) | set(extra))
 
     hits: list[str] = []
+
+    # 配置文件本身绝不能被跟踪：它含 API key，push 上去等于密钥公开
+    if any("model_config.json" in f for f in files):
+        hits.append("model_config.json 已被 git 跟踪 —— 含 API key，"
+                    "立刻 git rm --cached model_config.json")
     for rel in targets:
         path = ROOT / rel
         if not path.exists() or _allowed(rel):
