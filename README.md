@@ -82,8 +82,14 @@ v0.1 通道 → v0.2 接模型 → v0.3 按两轮审计返修（提交 `246d602`
 黑名单 + 凭据脱敏 + 200 字符上限；18 份历史 evidence 已迁出仓库（逐字段等值、
 sha256 自校验仍成立）。
 
-> ⚠️ **git 历史里仍有 15 份含正文片段的 evidence**（在 `6203c0d` 里）。
-> 当前无 remote，暂无外泄；**加 remote 或打包外发前必须先 `git filter-repo` 清理**。
+**历史已清理（2026-10-02）**：用 `git filter-repo --invert-paths --path evidence/`
+重写了两个提交，旧的 15 份 evidence blob 已不可访问（`git cat-file -t 6203c0d`
+报 not a valid object），reflog 清空、对象库重新打包。
+新历史：`d221eda`(v0.1) → `bc6d297`(v0.3) → `04e5e97`(docs)。
+
+> 清理时踩到一个坑：`filter-repo` 会丢弃工作树里未提交的改动，
+> 当时未提交的 README 被回滚到旧版。靠着清理前做的工作树备份恢复。
+> **改历史之前先备份，这句话不是口号。**
 
 ### P1 / P2
 
@@ -130,7 +136,7 @@ python router.py 8791
 |---|---|
 | A. 本机 SendTo 自用 | **可用**。别对配置/密钥文件点「总结」「翻译」——现在会拒绝，但别习惯性去试 |
 | B. HTTP 总线 | **可开启**，白名单别开太大 |
-| C. 仓库外发 | **不可外发**。历史里 15 份 evidence 待清理 |
+| C. 仓库外发 | **可外发**。历史已清理；外发前自查一遍 `.gitignore` 覆盖与工作树无 `model_config.json` |
 
 ## 实测耗时（evidence 里记 `elapsed_ms`，可复证）
 
@@ -167,7 +173,8 @@ HTTP 八项加固实测达标；evidence 不回落仓库。
 
 **未实机验证：** 系统通知弹窗（GUI 断言不了）
 
-**待用户决策：** git 历史里 15 份含正文 evidence 是否 `filter-repo` 清理
+**已清理：** git 历史里 15 份含正文 evidence 已用 `filter-repo` 摘除并 gc，
+旧对象不可访问。
 
 ## 下一步
 
