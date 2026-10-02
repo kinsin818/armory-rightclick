@@ -37,8 +37,11 @@
 ```bash
 python install_sendto.py      # 装进「发送到」菜单
 python uninstall_sendto.py    # 卸载，不留注册表
-python -m unittest discover -s tests
+python -m unittest discover -s tests          # 33 条自检，约 0.5 秒，不联网
+python scripts/pre_publish_scan.py            # 发布前敏感复扫
 ```
+
+CI 会在每次 push / PR 上跑这两条（`.github/workflows/test.yml`，Windows 环境）。
 
 ## 安装
 
