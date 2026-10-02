@@ -7,6 +7,7 @@ SendTo 会把选中的文件路径自动追加到命令行尾部。
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import router
 
 HERE = Path(__file__).resolve().parent
 NOTIFY = HERE / "notify.ps1"
+SLOW_LOCAL_BYTES = 8 << 20  # 本地动作超过这个体积就先发回执
 
 
 def set_clipboard(text: str) -> bool:
@@ -77,12 +79,22 @@ def main(argv: list[str]) -> int:
         notify("Armory", "没有选中任何对象")
         return 2
 
-    # 模型动作要等几秒到几十秒，先给个回执，否则右键点了像卡死
+    # 先给回执，否则右键点了像卡死。
+    # 不只是模型动作：33MB 的本地文件跑 outline 要 4 秒多，一样像卡死。
     meta = router.load_actions()["actions"].get(action, {})
-    if meta.get("kind") == "model":
+    need_notice = meta.get("kind") == "model"
+    if not need_notice:
+        try:
+            need_notice = any(
+                os.path.getsize(p) > SLOW_LOCAL_BYTES
+                for p in paths if os.path.isfile(p)
+            )
+        except OSError:
+            need_notice = False
+    if need_notice:
         notify(f"Armory · {meta.get('label', action)}", "正在处理，完成后会再通知你…")
 
-    out = router.route(action, paths)
+    out = router.route(action, paths, trusted=True)
     result = out.get("result", {})
 
     # 结果呈现：优先动作自带的 clipboard 内容，否则给一句状态摘要

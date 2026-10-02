@@ -51,8 +51,9 @@ def pythonw() -> Path:
 
 
 def _warn_if_fragile(path: Path) -> None:
-    text = str(path)
-    hit = next((d for d in _FRAGILE_DIRS if d in text), None)
+    # 折叠大小写：路径写法可能是 .WorkBuddy 而不是 .workbuddy
+    text = str(path).lower()
+    hit = next((d for d in _FRAGILE_DIRS if d.lower() in text), None)
     if hit:
         print(f"  [提醒] 解释器位于可被外部清理的目录（匹配 {hit}）：\n         {path}")
         print("         该目录的存留不由本项目控制，被清理后 10 个右键动作会静默失效，")

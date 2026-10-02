@@ -93,14 +93,23 @@ def _permission_gate(action: str, spec: dict):
 
 
 def assert_gate_consistency(spec: dict | None = None) -> list[str]:
-    """自检：动作表里所有高风险动作必须真的会被拦住。供测试调用。"""
+    """自检动作表。两类问题都报：
+
+    1. 字段缺失 —— gate 靠 risk / kind 判，缺字段的动作必须显式声明，
+       不能让自检对"缺字段"这一整类问题永久沉默。
+    2. 该拦没拦 —— 高风险动作却能从 gate 溜过去。
+    """
     spec = spec or load_actions()
     problems = []
     for name, meta in spec["actions"].items():
+        if "risk" not in meta:
+            problems.append(f"{name}: 缺 risk 字段（必须显式声明，none 也要写）")
+        if "kind" not in meta:
+            problems.append(f"{name}: 缺 kind 字段")
         risky = (meta.get("risk", "none") != "none"
                  or name in spec.get("risk_policy", {}).get("require_confirm", []))
         if risky and _permission_gate(name, spec) is None:
-            problems.append(name)
+            problems.append(f"{name}: 高风险却未被 gate 拦住")
     return problems
 
 
@@ -137,10 +146,12 @@ def _path_allowed(target: str, roots: list[Path]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def route(action: str, paths: list[str], trusted: bool = True) -> dict:
+def route(action: str, paths: list[str], *, trusted: bool) -> dict:
     """完整链路：权限门 → 抽取上下文 → 执行 → 落 evidence。
 
-    trusted=False 时额外校验路径落在白名单内。
+    trusted 必填且必须显式写。曾经给默认 True，于是将来接
+    IExplorerCommand / 浏览器扩展 / 输入法这类新入口时，谁忘了传
+    谁就默默拿到一条无沙箱通道——那正是这条参数存在的意义。
     """
     spec = load_actions()
     meta = spec["actions"].get(action)
@@ -152,16 +163,17 @@ def route(action: str, paths: list[str], trusted: bool = True) -> dict:
     denied = _permission_gate(action, spec)
     if denied:
         denied["http"] = 403
-        with evidence.Timer() as t:
-            pass
-        rec = evidence.write(action, [], denied, t.ms)
+        # 门都没过，没什么可计时的，如实记 0
+        rec = evidence.write(action, [], denied, 0)
         return {"status": "denied", "http": 403, "action": action,
                 "objects": [], "result": denied, "evidence": rec}
 
     if not paths:
+        # 空输入也留证据：denied 落、error 不落，取证不对称，审计闭环就有洞
         result = {"status": "error", "http": 400, "message": "没有传入任何对象"}
+        rec = evidence.write(action, [], result, 0)
         return {"status": "error", "http": 400, "action": action,
-                "objects": [], "result": result}
+                "objects": [], "result": result, "evidence": rec}
 
     if not trusted:
         roots = allowed_roots()
@@ -238,9 +250,11 @@ class _Handler(BaseHTTPRequestHandler):
         if host not in ("127.0.0.1", "localhost", "::1"):
             return self._send(403, b'{"error":"bad host"}')
 
-        # 2) Origin 一旦出现就必须同源，杜绝网页驱动
+        # 2) Origin 一旦出现必须与 Host 完全相等。
+        #    曾经用 startswith，于是 http://127.0.0.1:18911.evil.test 这种
+        #    前缀伪装的源照样通过（实测 200 OK）。
         origin = self.headers.get("Origin")
-        if origin and not origin.startswith(f"http://{self.headers.get('Host')}"):
+        if origin and origin != f"http://{self.headers.get('Host')}":
             return self._send(403, b'{"error":"bad origin"}')
 
         # 3) 共享密钥，常量时间比较
@@ -287,8 +301,9 @@ def serve(port: int = DEFAULT_PORT, token: str = ""):
     if not allowed_roots():
         raise SystemExit(
             "拒绝启动：未配置 ARMORY_ALLOWED_ROOTS。\n"
-            "HTTP 总线会把本地文件读取能力暴露给本机任意进程，必须先限定可访问的根目录，例如：\n"
-            "  set ARMORY_ALLOWED_ROOTS=D:\\Armory\n"
+            "HTTP 总线会把本地文件读取能力暴露给本机任意进程，必须先限定可访问的根目录。\n"
+            "只开一个专门的收件目录，不要把整个盘或整个工作区开进去：\n"
+            "  set ARMORY_ALLOWED_ROOTS=D:\\Armory\\inbox\n"
         )
     httpd = _ArmoryHTTPServer(("127.0.0.1", port), _Handler, token)
     print(f"Armory Action Router 监听 127.0.0.1:{port}")

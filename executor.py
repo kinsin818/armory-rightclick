@@ -189,6 +189,10 @@ def _jpeg_size(data: bytes):
 
 
 def _h_imgmeta(ctx: dict) -> dict:
+    blocked = _gate_size(ctx, LOCAL_MAX_BYTES, "读取图片元信息")
+    if blocked:
+        return blocked
+
     path = Path(ctx["path"])
     try:
         with open(path, "rb") as fh:
@@ -229,6 +233,9 @@ def _h_index(ctx: dict) -> dict:
 
 
 def _h_ocr(ctx: dict) -> dict:
+    blocked = _gate_size(ctx, LOCAL_MAX_BYTES, "OCR")
+    if blocked:
+        return blocked
     if not OCR_PS1.exists():
         return {"status": "error", "kind": "local", "message": f"缺少 {OCR_PS1}"}
 
@@ -290,10 +297,10 @@ def _read_for_model(ctx: dict, limit: int = 0) -> tuple[str, int]:
 
     path = Path(ctx["path"])
 
-    if detector.is_sensitive_path(str(path)):
+    reason = detector.sensitive_reason(str(path))
+    if reason:
         raise RuntimeError(
-            "拒绝发送：这个文件名看起来装着凭据或配置（key / secret / token / .env / "
-            "config.json / .pem / id_rsa …）。\n"
+            f"拒绝发送：{reason}。\n"
             "「总结」「翻译」会把正文原样发给第三方模型，等于把钥匙交出去。\n"
             "确实要处理，请先人工复制需要的片段到一个普通文件里再右键。"
         )
@@ -353,9 +360,18 @@ def _h_describe(ctx: dict) -> dict:
         return {"status": "error", "kind": "model",
                 "message": f"图片描述不支持 {ext or '无扩展名'} 格式，"
                            f"当前仅支持 {', '.join(sorted(VISION_MIME))}"}
+
     blocked = _gate_size(ctx, MODEL_MAX_BYTES, "图片描述")
     if blocked:
         return blocked
+
+    # 图片是唯一无法脱敏的输入——文本能 [REDACTED]，PNG 只能整张上传。
+    # 所以图片路的敏感闸门比文本路更重要，不是可选项。
+    reason = detector.sensitive_reason(ctx["path"])
+    if reason:
+        return {"status": "denied", "kind": "model",
+                "message": f"拒绝发送：{reason}。\n"
+                           "图片无法部分脱敏，只能整张上传给视觉模型，因此直接拒发。"}
 
     raw = model.vision(
         ctx["path"],

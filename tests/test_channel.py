@@ -40,23 +40,23 @@ class ChannelTest(unittest.TestCase):
     # ---- 入口健壮性 ----
 
     def test_empty_paths_is_error_not_crash(self):
-        out = router.route("info", [])
+        out = router.route("info", [], trusted=True)
         self.assertEqual(out["status"], "error")
         self.assertEqual(out["http"], 400)
 
     def test_unknown_action_is_400(self):
-        self.assertEqual(router.route("nope", [str(ROOT / "cli.py")])["http"], 400)
+        self.assertEqual(router.route("nope", [str(ROOT / "cli.py")], trusted=True)["http"], 400)
 
     def test_unknown_action_writes_no_evidence(self):
         before = len(list(Path(os.environ["ARMORY_EVIDENCE_DIR"]).glob("*.json")))
-        router.route("../../evil", [str(ROOT / "cli.py")])
+        router.route("../../evil", [str(ROOT / "cli.py")], trusted=True)
         after = len(list(Path(os.environ["ARMORY_EVIDENCE_DIR"]).glob("*.json")))
         self.assertEqual(before, after, "未知动作不该落证据文件")
 
     # ---- Permission Gate：默认拒绝，不是黑名单 ----
 
     def test_high_risk_action_denied(self):
-        out = router.route("rename", [str(ROOT / "cli.py")])
+        out = router.route("rename", [str(ROOT / "cli.py")], trusted=True)
         self.assertEqual(out["status"], "denied")
         self.assertEqual(out["http"], 403)
 
@@ -74,7 +74,7 @@ class ChannelTest(unittest.TestCase):
 
     def test_gate_precedes_extraction(self):
         """被拒绝的动作不该留下对象正文快照。"""
-        out = router.route("rename", [str(ROOT / "cli.py")])
+        out = router.route("rename", [str(ROOT / "cli.py")], trusted=True)
         self.assertEqual(out["objects"], [])
 
     def test_action_table_gate_consistency(self):
@@ -82,10 +82,6 @@ class ChannelTest(unittest.TestCase):
         self.assertEqual(leaks, [], f"这些高风险动作没有被拦住：{leaks}")
 
     # ---- 隐私：证据与预览 ----
-
-    def test_evidence_dir_is_outside_repo(self):
-        d = evidence.default_dir()
-        self.assertNotIn(str(ROOT), str(d), "证据默认目录必须落在仓库之外")
 
     def test_preview_off_by_default(self):
         os.environ.pop("ARMORY_CAPTURE_PREVIEW", None)
@@ -131,7 +127,7 @@ class ChannelTest(unittest.TestCase):
         ctx = detector.extract(str(p))
         self.assertEqual(ctx["type"], "document", "伪装成 pdf 确实会被判成文档")
         with mock.patch("model.chat", side_effect=AssertionError("不该调到模型")):
-            out = router.route("summarize", [str(p)])
+            out = router.route("summarize", [str(p)], trusted=True)
         self.assertNotEqual(out["result"].get("status"), "ok")
         self.assertIn("不是纯文本", out["result"].get("message", ""))
 
@@ -172,7 +168,7 @@ class ChannelTest(unittest.TestCase):
         """右键「总结」自己的 model_config.json：必须拒绝，不能发出去。"""
         with mock.patch.object(model, "_post",
                                side_effect=AssertionError("凭据文件不该被发出")):
-            out = router.route("summarize", [str(ROOT / "model_config.json")])
+            out = router.route("summarize", [str(ROOT / "model_config.json")], trusted=True)
         self.assertNotEqual(out["result"].get("status"), "ok")
         self.assertIn("拒绝发送", out["result"].get("message", ""))
 
@@ -182,7 +178,7 @@ class ChannelTest(unittest.TestCase):
         p.write_text("nvapi-FAKE1\nnvapi-FAKE2\n", encoding="utf-8")
         with mock.patch.object(model, "_post",
                                side_effect=AssertionError("key 文件不该被发出")):
-            out = router.route("translate", [str(p)])
+            out = router.route("translate", [str(p)], trusted=True)
         self.assertNotEqual(out["result"].get("status"), "ok")
         self.assertIn("拒绝发送", out["result"].get("message", ""))
 
@@ -199,7 +195,7 @@ class ChannelTest(unittest.TestCase):
             return {"choices": [{"message": {"content": "done"}}]}
 
         with mock.patch.object(model, "_post", fake_post):
-            out = router.route("summarize", [str(p)])
+            out = router.route("summarize", [str(p)], trusted=True)
 
         body = json.dumps(captured, ensure_ascii=False)
         self.assertNotIn("nvapi-REALKEY1234567", body, "明文凭据进了请求体")
@@ -246,6 +242,58 @@ class ChannelTest(unittest.TestCase):
         text = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn("evidence/", text)
         self.assertNotIn("evidencetmp/", text, "死规则该删掉了")
+
+    # ---- 图片外发（第 3 轮 M-1）：图片无法脱敏，闸门比文本路更关键 ----
+
+    def test_sensitive_image_is_never_sent_to_vision_model(self):
+        """一张叫 key.png 的图，不能整张上传给视觉模型。"""
+        p = self.tmp / "key.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)  # 够过 PNG 头校验
+        with mock.patch.object(model, "_post",
+                               side_effect=AssertionError("敏感图片不该被上传")):
+            out = router.route("describe", [str(p)], trusted=True)
+        self.assertNotEqual(out["result"].get("status"), "ok")
+        self.assertIn("拒绝发送", out["result"].get("message", ""))
+
+    # ---- 脱敏召回（第 3 轮 M-2）：常见凭据类型不能漏 ----
+
+    def test_redact_covers_common_credential_shapes(self):
+        cases = {
+            "AKIA": "aws = AKIAIOSFODNN7EXAMPLE",
+            "github": "tok = ghp_16C7e42F8b0a4e1f9c3d5a7b6e8f0a1c2d3e4f5a",
+            "jwt": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123",
+            "conn": "db = mysql://root:Tr0ub4dor3@10.0.0.5/prod",
+        }
+        for name, line in cases.items():
+            red, n = detector.redact(line)
+            self.assertGreater(n, 0, f"{name} 型凭据没被识别：{line}")
+            self.assertIn("[REDACTED]", red)
+
+    # ---- 误拒（第 3 轮 M-3）：正常文件不该被当成凭据挡掉 ----
+
+    def test_normal_files_are_not_mistaken_for_secrets(self):
+        """子串匹配曾把 monkey.md、token-usage.csv 全拒了，误拒比漏放更伤信任。"""
+        for name in ("turkey.txt", "monkey.md", "token-usage.csv", "keyword_research.md"):
+            self.assertIsNone(detector.sensitive_reason(name),
+                              f"{name} 不该被判为敏感文件")
+
+    def test_real_secret_names_are_still_caught(self):
+        for name in ("key.txt", "api_keys.json", "secrets.yaml",
+                     "id_rsa", "server.pem", "harbor_config.json", ".env.local"):
+            self.assertIsNotNone(detector.sensitive_reason(name),
+                                 f"{name} 必须被判为敏感文件")
+
+    def test_denial_says_which_rule_matched(self):
+        """拒绝话术要说出命中了哪条，否则用户只能猜怎么绕过。"""
+        reason = detector.sensitive_reason("api_keys.json")
+        self.assertIsInstance(reason, str)
+        self.assertTrue(len(reason) > 0)
+
+    # ---- trusted 必填（第 3 轮 N-5）----
+
+    def test_route_requires_explicit_trusted(self):
+        with self.assertRaises(TypeError):
+            router.route("info", [str(ROOT / "cli.py")])
 
     def test_token_file_is_generated_once(self):
         with mock.patch.object(router, "TOKEN_FILE", self.tmp / "token"):

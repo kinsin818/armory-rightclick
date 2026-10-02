@@ -50,23 +50,39 @@ TYPE_LABEL = {
     "missing": "路径不存在",
 }
 
-# 这些文件一律不抽正文，哪怕开了预览开关
-_SENSITIVE_NAME_RE = re.compile(
-    r"(^|\\)(\.env|.*secret.*|.*creden.*|.*key.*|.*token.*|.*config.*\.json$"
-    r"|.*\.pem$|.*\.p12$|.*\.pfx$|.*\.pfx|id_rsa.*)",
-    re.IGNORECASE,
-)
+# 这些文件一律不抽正文、不外发。
+#
+# 用「词紧贴扩展名」而不是子串匹配。曾经写成 .*key.* 这类子串，后果是
+# monkey.md（菜谱）、token-usage.csv（用量统计）都被当成凭据文件拒发——
+# 误拒比漏放更伤信任，用户读到「这看起来装着凭据」会觉得防护在胡说。
+# (人话原因, 正则)。拒绝时必须说出命中了哪一条，否则用户只能猜怎么绕过。
+_SENSITIVE_RULES: list[tuple[str, str]] = [
+    ("文件名以 .env 开头", r"^\.env"),
+    ("文件名含凭据词（key / secret / token / credential）且紧贴扩展名",
+     r"(^|[-_.])(keys?|secrets?|tokens?|credentials?)\.[^.]+$"),
+    ("文件名形如 *config*.json", r"config.*\.json$"),
+    ("扩展名是私钥或证书（.pem / .p12 / .pfx / .key）", r"\.(pem|p12|pfx|key)$"),
+    ("文件名是 ssh 私钥（id_rsa…）", r"^id_rsa"),
+    ("文件名含 password / passwd", r"(passwd|password)"),
+]
 
-# 正文里的凭据形状，抽预览时一律抹掉
+# 正文里的凭据形状。召回不完美，但常见类型要覆盖：
+# 第 3 轮实测 7/11，漏掉的是 AWS AKIA、JWT、GitHub token、数据库连接串。
 _SECRET_RE = re.compile(
     r"(nvapi-[A-Za-z0-9_\-]+"
     r"|sk-[A-Za-z0-9_\-]{8,}"
+    r"|\bAKIA[0-9A-Z]{16}\b"                                        # AWS access key
+    r"|\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}\b"        # GitHub token
+    r"|\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\.?[A-Za-z0-9_\-]*"  # JWT
+    r"|[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^@\s]{4,}@"                  # 连接串里的口令
     r"|-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
-    r"|(?:api[_-]?key|token|password|passwd|secret)\s*[:=]\s*\S+)",
+    r"|(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret)"
+    r"\s*[:=]\s*\S+)",
     re.IGNORECASE,
 )
 
 PREVIEW_MAX_CHARS = 200
+LINE_COUNT_MAX_BYTES = 5 << 20  # 超过就不数行数，免得右键卡住
 
 
 def capture_preview_enabled() -> bool:
@@ -159,15 +175,24 @@ def _redact(text: str) -> str:
     return _SECRET_RE.sub("[REDACTED]", text)
 
 
-def is_sensitive_path(target: str) -> bool:
-    """路径是否落在敏感名单里（key / secret / token / .env / config.json / .pem …）。
+def sensitive_reason(target: str) -> str | None:
+    """命中敏感名单则返回人话原因，否则 None。
 
     本地留存和外发两条路都要问这个函数。第 2 轮审计的 P0 就是：返修只在
     本地留存那条路上接了它，外发那条一条没接，导致右键「总结」自己的
     model_config.json 会把明文 key 发给第三方模型。
+
+    第 3 轮又发现：图片外发那条路同样没接，而图片是唯一无法脱敏的输入。
     """
-    p = Path(target)
-    return bool(_SENSITIVE_NAME_RE.search(str(p)) or _SENSITIVE_NAME_RE.search(p.name))
+    name = Path(target).name
+    for reason, pattern in _SENSITIVE_RULES:
+        if re.search(pattern, name, re.IGNORECASE):
+            return reason
+    return None
+
+
+def is_sensitive_path(target: str) -> bool:
+    return sensitive_reason(target) is not None
 
 
 def redact(text: str) -> tuple[str, int]:
@@ -239,10 +264,27 @@ def extract(target: str) -> dict:
     })
 
     if obj_type in ("code", "text", "document"):
+        # 行数独立于 preview：动作描述里写了「行数」，默认状态却拿不到，
+        # 就是文档超前于实现。preview 可以关，行数该有还得有。
+        if stat.st_size <= LINE_COUNT_MAX_BYTES:
+            n = _count_lines(path)
+            if n is not None:
+                ctx["line_count"] = n
+        ctx["char_count"] = stat.st_size
         head = _read_preview(path)
         if head is not None:
-            ctx["line_count"] = head[0]
-            ctx["char_count"] = stat.st_size
             ctx["preview"] = head[1]
 
     return ctx
+
+
+def _count_lines(path: Path) -> int | None:
+    """流式数行。按字节迭代，不把内容解码进内存。"""
+    try:
+        n = 0
+        with open(path, "rb") as fh:
+            for _ in fh:
+                n += 1
+        return n
+    except OSError:
+        return None

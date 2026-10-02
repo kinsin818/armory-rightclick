@@ -99,7 +99,7 @@ def chat(system: str, user: str, max_tokens: int = 1500, model: str = "") -> str
     """普通对话。抛出 RuntimeError 时 message 已是可直接展示的原因。
 
     推理模型会先用掉几百 token 思考，再产出正文。max_tokens 给小了会出现
-    「思考完了但正文没生成」，所以正文为空时自动翻倍重试一次。
+    「思考完了但正文没生成」，所以正文为空时把预算提到 3 倍重试一次。
     """
     cfg = load_config()
     if not cfg.get("base_url") or not cfg.get("api_key") or not cfg.get("model"):
@@ -118,6 +118,7 @@ def chat(system: str, user: str, max_tokens: int = 1500, model: str = "") -> str
     try:
         return _first_content(_post(cfg, payload))
     except _EmptyContent:
+        # 预算加到 3 倍重试一次（不是翻倍）
         payload["max_tokens"] = max_tokens * 3
         try:
             return _first_content(_post(cfg, payload))
@@ -179,10 +180,3 @@ def vision(image_path: str, prompt: str, max_tokens: int = 1200,
     except _EmptyContent:
         payload["max_tokens"] = max_tokens * 3
         return _first_content(_post(cfg, payload))
-
-
-def clip(text: str, limit: int) -> str:
-    """超长输入截断，避免一次请求烧掉整篇长文。"""
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n\n……（原文已截断，实际 {len(text)} 字符，送入模型 {limit} 字符）"

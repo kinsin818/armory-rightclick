@@ -46,7 +46,7 @@
     },
     "describe": {
       "label": "生成图片描述", "kind": "model", "types": ["image"], "risk": "none", "egress": true,
-      "desc": "调视觉模型看图说话，会把图片本身发往第三方模型。仅支持 PNG/JPEG/WEBP/GIF",
+      "desc": "调视觉模型看图说话。图片无法部分脱敏，只能整张上传给第三方模型；命中敏感名单的图直接拒发。仅支持 PNG/JPEG/WEBP/GIF",
       "needs": "vision_model"
     },
 
