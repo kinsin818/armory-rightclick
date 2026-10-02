@@ -1,0 +1,72 @@
+{
+  "_comment": "动作表。types 里的 * 表示适配所有对象类型。kind: local=本机执行不联网, model=需调大模型, stub=尚未接线。",
+
+  "actions": {
+    "info": {
+      "label": "查看信息", "kind": "local", "types": ["*"], "risk": "none",
+      "desc": "抽取对象上下文：类型、大小、修改时间、SHA-256、文本预览"
+    },
+    "hash": {
+      "label": "复制 SHA-256", "kind": "local", "risk": "none",
+      "types": ["code", "image", "document", "archive", "text", "binary"],
+      "desc": "计算并写入剪贴板"
+    },
+    "paths": {
+      "label": "复制路径列表", "kind": "local", "types": ["*"], "risk": "none",
+      "desc": "把选中对象的绝对路径写进剪贴板"
+    },
+    "outline": {
+      "label": "提取代码结构", "kind": "local", "types": ["code"], "risk": "none",
+      "desc": "正则扫描出 import / 顶层定义，不解析 AST，不执行代码"
+    },
+    "imgmeta": {
+      "label": "读取图片元信息", "kind": "local", "types": ["image"], "risk": "none",
+      "desc": "解析文件头得到格式与像素尺寸，不解码图片"
+    },
+    "index": {
+      "label": "生成目录索引", "kind": "local", "types": ["folder"], "risk": "none",
+      "desc": "统计文件数、体积、扩展名分布，输出 markdown 索引"
+    },
+    "ocr": {
+      "label": "OCR 识别文字", "kind": "local", "types": ["image"], "risk": "none",
+      "desc": "Windows 自带 OCR 引擎，本地执行，不联网不消耗额度"
+    },
+
+    "summarize": {
+      "label": "总结", "kind": "model", "risk": "none",
+      "types": ["code", "document", "text"],
+      "desc": "调模型总结文件内容，超长自动截断",
+      "needs": "model"
+    },
+    "translate": {
+      "label": "翻译", "kind": "model", "risk": "none",
+      "types": ["code", "document", "text"],
+      "desc": "中译英 / 英译中自动判断",
+      "needs": "model"
+    },
+    "describe": {
+      "label": "生成图片描述", "kind": "model", "types": ["image"], "risk": "none",
+      "desc": "调视觉模型看图说话",
+      "needs": "vision_model"
+    },
+
+    "audit": {
+      "label": "交给 GOLink 审计", "kind": "stub", "risk": "none",
+      "types": ["code", "folder", "document"],
+      "desc": "需要 GOLink 调度通道，当前未接线",
+      "needs": "golink"
+    },
+    "rename": {
+      "label": "智能重命名", "kind": "stub", "risk": "high",
+      "types": ["code", "image", "document", "text", "archive"],
+      "desc": "需模型接入，且属高危动作，确认流程未实现前拒绝执行",
+      "needs": "model"
+    }
+  },
+
+  "risk_policy": {
+    "_comment": "Permission Gate 的高危清单。risk=high 的动作必须显式确认才允许执行，原型阶段一律拒绝。",
+    "require_confirm": ["rename"],
+    "prototype_deny": ["rename"]
+  }
+}

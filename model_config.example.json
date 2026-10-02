@@ -1,0 +1,22 @@
+{
+  "_comment": "复制为 model_config.json 后填写。该文件已在 .gitignore 忽略（若建了仓库）。也可以完全不建这个文件，改用环境变量 ARMORY_LLM_BASE_URL / ARMORY_LLM_API_KEY / ARMORY_LLM_MODEL / ARMORY_LLM_VISION_MODEL。",
+
+  "provider": "openai-compatible",
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "",
+  "model": "deepseek-chat",
+  "vision_model": "",
+  "timeout": 90,
+  "max_input_chars": 6000,
+
+  "_presets": {
+    "deepseek":  {"base_url": "https://api.deepseek.com/v1"},
+    "moonshot":  {"base_url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k"},
+    "qwen":      {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
+    "zhipu":     {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-flash"},
+    "siliconflow": {"base_url": "https://api.siliconflow.cn/v1"},
+    "nvidia-nim": {"base_url": "https://integrate.api.nvidia.com/v1"},
+    "ollama-local": {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b", "api_key": "ollama"},
+    "lmstudio-local": {"base_url": "http://127.0.0.1:1234/v1", "model": "local-model", "api_key": "lm-studio"}
+  }
+}
