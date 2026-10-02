@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # 项目本体是 Windows 右键工具（发送到菜单、WinRT OCR、PowerShell），
+    # CI 就跑在真实目标平台上，不在 Linux 上假装跨平台。
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 通道自检
+        run: python -m unittest discover -s tests -v
+
+      - name: 发布前敏感复扫
+        run: python scripts/pre_publish_scan.py

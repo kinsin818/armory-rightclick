@@ -32,10 +32,24 @@ class ChannelTest(unittest.TestCase):
         os.environ["ARMORY_EVIDENCE_DIR"] = str(Path(cls._tmp.name) / "ev")
         cls.tmp = Path(cls._tmp.name)
 
+        # 测试不能依赖本地 model_config.json —— 它被 gitignore，CI 的干净
+        # 克隆上没有，chat() 会在配置检查那步就抛错，根本走不到打桩的 _post。
+        # 指向一个死端口，即便打桩漏了也不会真发出请求。
+        cls._fake_env = {
+            "ARMORY_LLM_BASE_URL": "http://127.0.0.1:9/v1",
+            "ARMORY_LLM_API_KEY": "CANARY-FAKE-KEY",
+            "ARMORY_LLM_MODEL": "fake-model",
+            "ARMORY_LLM_VISION_MODEL": "fake-vision",
+        }
+        os.environ.update(cls._fake_env)
+        model.load_config(force=True)
+
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
-        os.environ.pop("ARMORY_EVIDENCE_DIR", None)
+        for key in ("ARMORY_EVIDENCE_DIR", *cls._fake_env):
+            os.environ.pop(key, None)
+        model.load_config(force=True)
 
     # ---- 入口健壮性 ----
 
@@ -165,10 +179,15 @@ class ChannelTest(unittest.TestCase):
     # ---- 外发路径的凭据防护（第 2 轮审计新增 P0） ----
 
     def test_sensitive_config_is_never_sent_to_model(self):
-        """右键「总结」自己的 model_config.json：必须拒绝，不能发出去。"""
+        """右键「总结」自己的 model_config.json：必须拒绝，不能发出去。
+
+        自己造一个同名文件：仓库里那个被 gitignore，干净克隆上不存在。
+        """
+        p = self.tmp / "model_config.json"
+        p.write_text('{"api_key": "CANARY-FAKE"}', encoding="utf-8")
         with mock.patch.object(model, "_post",
                                side_effect=AssertionError("凭据文件不该被发出")):
-            out = router.route("summarize", [str(ROOT / "model_config.json")], trusted=True)
+            out = router.route("summarize", [str(p)], trusted=True)
         self.assertNotEqual(out["result"].get("status"), "ok")
         self.assertIn("拒绝发送", out["result"].get("message", ""))
 
