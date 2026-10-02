@@ -19,22 +19,38 @@ NOTIFY = HERE / "notify.ps1"
 
 
 def set_clipboard(text: str) -> bool:
-    """经临时文件写剪贴板，绕开命令行转义与 GBK 编码问题。"""
+    """经临时文件写剪贴板，绕开命令行转义与 GBK 编码问题。
+
+    必须看返回码。曾经无条件 return True，导致 RDP 会话、剪贴链被锁、
+    powershell 不在 PATH 时，用户看到「已写入剪贴板」而剪贴板其实是空的——
+    这种静默假成功比明确失败更伤信任。
+    """
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
             "w", suffix=".txt", delete=False, encoding="utf-8"
         ) as tmp:
             tmp.write(text)
             tmp_path = tmp.name
-        subprocess.run(
+        proc = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
              f"Set-Clipboard -Value (Get-Content -Raw -Encoding UTF8 '{tmp_path}')"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
             check=False, timeout=15,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        if proc.returncode != 0:
+            print("clipboard failed:", (proc.stderr or "").strip()[:200], file=sys.stderr)
+            return False
         return True
-    except Exception:
+    except Exception as exc:
+        print(f"clipboard failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return False
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
 
 
 def notify(title: str, text: str) -> None:
@@ -71,8 +87,9 @@ def main(argv: list[str]) -> int:
 
     # 结果呈现：优先动作自带的 clipboard 内容，否则给一句状态摘要
     if result.get("clipboard"):
-        set_clipboard(result["clipboard"])
-        summary = f"已写入剪贴板 · {len(result['clipboard'])} 字符"
+        ok = set_clipboard(result["clipboard"])
+        summary = (f"已写入剪贴板 · {len(result['clipboard'])} 字符" if ok
+                   else f"结果已生成但写入剪贴板失败（{len(result['clipboard'])} 字符，见 evidence）")
     else:
         summary = result.get("message") or f"状态：{out.get('status')}"
 

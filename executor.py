@@ -19,13 +19,71 @@ import model
 HERE = Path(__file__).resolve().parent
 OCR_PS1 = HERE / "ocr.ps1"
 
+# 大小闸门。detector 已经算好了 size_bytes，这里必须真的用它，不能只是摆设。
+LOCAL_MAX_BYTES = 50 << 20    # 本地动作：50MB
+MODEL_MAX_BYTES = 2 << 20     # 送模型：2MB，超出既慢又烧额度
+
+# 视觉模型只认这几种。svg/psd/raw/heic/ico 喂过去只会报错。
+VISION_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _gate_size(ctx: dict, limit: int, what: str) -> dict | None:
+    size = ctx.get("size_bytes") or 0
+    if size > limit:
+        return {"status": "error", "kind": "local",
+                "message": f"{what}：文件 {size / 1048576:.1f}MB 超过上限 "
+                           f"{limit / 1048576:.0f}MB，已跳过（避免卡死右键）"}
+    return None
+
 # ---------------------------------------------------------------------------
 # local handlers
 # ---------------------------------------------------------------------------
 
 
 def _h_info(ctx: dict) -> dict:
-    return {"status": "ok", "kind": "local", "data": ctx}
+    """生成可读摘要。
+
+    曾经只是把 ctx 原样回给调用方，剪贴板里什么都没有，而动作描述还写着
+    「含 SHA-256」——描述与实际对不上。现在摘要里有的字段才写。
+    """
+    lines = [f"# 信息：{ctx['name']}", "",
+             f"- 类型：{ctx.get('type_label', '未知')}",
+             f"- 路径：`{ctx.get('path')}`"]
+
+    if not ctx.get("exists"):
+        lines.append("- 状态：路径不存在")
+        return {"status": "ok", "kind": "local", "clipboard": "\n".join(lines), "data": ctx}
+
+    size = ctx.get("size_bytes")
+    if size is not None:
+        lines.append(f"- 大小：{size:,} 字节（{size / 1024:.1f} KB）")
+    if ctx.get("modified"):
+        lines.append(f"- 修改时间：{ctx['modified']}")
+    if ctx.get("extension"):
+        lines.append(f"- 扩展名：`{ctx['extension']}`")
+
+    if ctx.get("file_count") is not None:
+        tail = "（已截断统计）" if ctx.get("truncated") else ""
+        lines.append(f"- 文件数：{ctx['file_count']}{tail}")
+        if ctx.get("top_extensions"):
+            lines.append("")
+            lines.append("## 扩展名分布")
+            lines += [f"- `{e}` × {n}" for e, n in ctx["top_extensions"]]
+
+    if ctx.get("line_count") is not None:
+        lines.append(f"- 行数：{ctx['line_count']}")
+
+    if ctx.get("preview"):
+        lines += ["", "## 预览", "```", ctx["preview"], "```"]
+
+    lines += ["", "- SHA-256：本动作不计算；需要请用「复制 SHA-256」"]
+    return {"status": "ok", "kind": "local", "clipboard": "\n".join(lines), "data": ctx}
 
 
 def _h_hash(ctx: dict) -> dict:
@@ -53,18 +111,37 @@ _IMPORT_RE = re.compile(
 
 
 def _h_outline(ctx: dict) -> dict:
+    blocked = _gate_size(ctx, LOCAL_MAX_BYTES, "提取代码结构")
+    if blocked:
+        return blocked
+
     path = Path(ctx["path"])
+    defs: list[str] = []
+    imports: list[str] = []
+    line_count = 0
+
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        # 逐行流式扫描。曾经整文件读进内存再跑两次全文正则，33MB 输入峰值 121MB；
+        # 改成 chunks 攒完再 join 更是涨到 153MB（等于全文进内存还多一份）。
+        # 现在内存占用与文件大小无关。
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line_count += 1
+                if len(line) > 1 << 20:      # 单行超 1MB（压缩过的巨型 JSON）不参与匹配
+                    continue
+                m = _DEF_RE.match(line)
+                if m:
+                    defs.append(m.group(1))
+                    continue
+                m = _IMPORT_RE.match(line)
+                if m:
+                    imports.append(m.group(0).strip()[:100])
     except OSError as exc:
         return {"status": "error", "kind": "local", "message": f"读取失败：{exc}"}
 
-    imports = [m.group(0).strip()[:100] for m in _IMPORT_RE.finditer(text)]
-    defs = [m.group(1) for m in _DEF_RE.finditer(text)]
-
     lines = [
         f"# 结构：{path.name}", "",
-        f"- 总行数：{len(text.splitlines())}",
+        f"- 总行数：{line_count}",
         f"- 顶层定义数：{len(defs)}",
         f"- import/引用数：{len(imports)}", "",
         "## 顶层定义",
@@ -198,32 +275,71 @@ _TRANSLATE_SYS = (
 _DESCRIBE_SYS = "You are a vision assistant."
 
 
-def _read_for_model(ctx: dict, limit: int = 0) -> str:
+def _read_for_model(ctx: dict, limit: int = 0) -> tuple[str, int]:
+    """送模型前的五道闸门：大小、是否纯文本、是否敏感文件、读多少、内容脱敏。
+
+    返回 (正文, 脱敏处数)。
+
+    少了第三道会出真事故：用户右键「总结」自己的 model_config.json 或 key.txt，
+    明文凭据会原样发往第三方模型。这类文件往往很小（key.txt 只有 1.3KB），
+    体积闸门根本拦不住——第 2 轮审计的 P0 就是这条。
+    """
+    blocked = _gate_size(ctx, MODEL_MAX_BYTES, "送模型")
+    if blocked:
+        raise RuntimeError(blocked["message"].split("：", 1)[-1])
+
+    path = Path(ctx["path"])
+
+    if detector.is_sensitive_path(str(path)):
+        raise RuntimeError(
+            "拒绝发送：这个文件名看起来装着凭据或配置（key / secret / token / .env / "
+            "config.json / .pem / id_rsa …）。\n"
+            "「总结」「翻译」会把正文原样发给第三方模型，等于把钥匙交出去。\n"
+            "确实要处理，请先人工复制需要的片段到一个普通文件里再右键。"
+        )
+
+    if not detector.looks_text_path(str(path)):
+        raise RuntimeError(
+            "文件内容不是纯文本（检测到二进制字节）。本原型不支持 PDF / Word / Excel / "
+            "EPUB 等格式的正文抽取，需要专用抽取器，不送模型以免烧额度换幻觉。"
+        )
+
     if not limit:
         limit = int(model.load_config().get("max_input_chars", 6000))
-    try:
-        raw = Path(ctx["path"]).read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise RuntimeError(f"读取失败：{exc}")
+
+    # 只读需要的量，不把整个文件读进内存
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        raw = fh.read(limit)
     if not raw.strip():
         raise RuntimeError("文件内容为空，没什么可处理的")
-    return model.clip(raw, limit)
+
+    # 不是敏感文件名，内容里也可能夹着凭据，照样抹掉
+    raw, redacted = detector.redact(raw)
+    if len(raw) >= limit:
+        raw += f"\n\n……（已截断至前 {limit} 字符）"
+    return raw, redacted
 
 
 def _h_summarize(ctx: dict) -> dict:
-    text = _read_for_model(ctx)
+    text, redacted = _read_for_model(ctx)
     out = model.chat(_SUMMARY_SYS, f"文件：{ctx['name']}\n\n{text}", max_tokens=2000)
     body = f"# 总结：{ctx['name']}\n\n{out}"
+    if redacted:
+        body += f"\n\n> 发送前已抹掉 {redacted} 处疑似凭据"
     return {"status": "ok", "kind": "model", "clipboard": body,
-            "data": {"model": model.load_config().get("model")}}
+            "data": {"model": model.load_config().get("model"),
+                     "redacted": redacted, "egress": True}}
 
 
 def _h_translate(ctx: dict) -> dict:
     # 翻译送全文既慢又烧额度，且长输入会诱出推理模型的思考过程，单独压到 3000 字符
-    text = _read_for_model(ctx, limit=3000)
+    text, redacted = _read_for_model(ctx, limit=3000)
     out = model.chat(_TRANSLATE_SYS, text, max_tokens=3000)
+    if redacted:
+        out += f"\n\n> 发送前已抹掉 {redacted} 处疑似凭据"
     return {"status": "ok", "kind": "model", "clipboard": out,
-            "data": {"model": model.load_config().get("model")}}
+            "data": {"model": model.load_config().get("model"),
+                     "redacted": redacted, "egress": True}}
 
 
 def _h_describe(ctx: dict) -> dict:
@@ -232,12 +348,22 @@ def _h_describe(ctx: dict) -> dict:
     为什么不直接用大视觉模型出中文：实测 90b 视觉要走 60 秒以上，右键等不起。
     11b 视觉约 7 秒，加一步 3 秒翻译，总共 10 秒出中文，划算。
     """
+    ext = Path(ctx["path"]).suffix.lower()
+    if ext not in VISION_MIME:
+        return {"status": "error", "kind": "model",
+                "message": f"图片描述不支持 {ext or '无扩展名'} 格式，"
+                           f"当前仅支持 {', '.join(sorted(VISION_MIME))}"}
+    blocked = _gate_size(ctx, MODEL_MAX_BYTES, "图片描述")
+    if blocked:
+        return blocked
+
     raw = model.vision(
         ctx["path"],
         "Describe this image: what is the subject, what text or UI elements are visible, "
         "and what it might be used for. Be factual, no more than 6 sentences. "
         "Do not invent details you cannot see.",
         max_tokens=600,
+        mime=VISION_MIME[ext],
     )
 
     cn = raw

@@ -28,7 +28,15 @@ DEFAULTS = {
 }
 
 
-def load_config() -> dict:
+_cfg_cache: dict | None = None
+
+
+def load_config(force: bool = False) -> dict:
+    """配置缓存。一次右键动作里不该反复读盘解析。"""
+    global _cfg_cache
+    if _cfg_cache is not None and not force:
+        return _cfg_cache
+
     cfg = dict(DEFAULTS)
 
     if CONFIG_FILE.exists():
@@ -49,6 +57,7 @@ def load_config() -> dict:
         if val:
             cfg[key] = val
 
+    _cfg_cache = cfg
     return cfg
 
 
@@ -141,8 +150,12 @@ def _first_content(data: dict) -> str:
     raise _EmptyContent(f"finish_reason={data.get('choices', [{}])[0].get('finish_reason')}")
 
 
-def vision(image_path: str, prompt: str, max_tokens: int = 1200) -> str:
-    """视觉模型调用。需要配置 vision_model，否则报未配置。"""
+def vision(image_path: str, prompt: str, max_tokens: int = 1200,
+           mime: str = "image/png") -> str:
+    """视觉模型调用。需要配置 vision_model，否则报未配置。
+
+    mime 必须按真实后缀传。曾经恒写 image/png，拿 jpg 也会发 png 头。
+    """
     cfg = load_config()
     if not cfg.get("vision_model"):
         raise RuntimeError("未配置 vision_model，图片描述不可用（普通模型看不了图）")
@@ -155,7 +168,7 @@ def vision(image_path: str, prompt: str, max_tokens: int = 1200) -> str:
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
                 {"type": "text", "text": prompt},
             ],
         }],

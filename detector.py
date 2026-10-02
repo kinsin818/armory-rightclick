@@ -2,11 +2,16 @@
 
 Context Extractor 的前半段：判定「用户右键的到底是什么」。
 只做判定与抽取，不做任何动作、不写任何文件。
+
+预览（preview）默认关闭。原因：正文会被写进 evidence，而 evidence 曾经
+随仓库进 git，等于把用户文件内容存进版本历史（审计报告 P0-2）。
+需要预览时用环境变量 ARMORY_CAPTURE_PREVIEW=1 打开，且敏感文件一律不抽。
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +50,28 @@ TYPE_LABEL = {
     "missing": "路径不存在",
 }
 
+# 这些文件一律不抽正文，哪怕开了预览开关
+_SENSITIVE_NAME_RE = re.compile(
+    r"(^|\\)(\.env|.*secret.*|.*creden.*|.*key.*|.*token.*|.*config.*\.json$"
+    r"|.*\.pem$|.*\.p12$|.*\.pfx$|.*\.pfx|id_rsa.*)",
+    re.IGNORECASE,
+)
+
+# 正文里的凭据形状，抽预览时一律抹掉
+_SECRET_RE = re.compile(
+    r"(nvapi-[A-Za-z0-9_\-]+"
+    r"|sk-[A-Za-z0-9_\-]{8,}"
+    r"|-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
+    r"|(?:api[_-]?key|token|password|passwd|secret)\s*[:=]\s*\S+)",
+    re.IGNORECASE,
+)
+
+PREVIEW_MAX_CHARS = 200
+
+
+def capture_preview_enabled() -> bool:
+    return os.environ.get("ARMORY_CAPTURE_PREVIEW", "").strip() in ("1", "true", "yes")
+
 
 def detect(target: str) -> str:
     """判定对象类型。返回值见 TYPE_LABEL。"""
@@ -78,6 +105,11 @@ def _looks_text(path: Path, sample: int = 4096) -> bool:
     if not chunk:
         return True
     return b"\x00" not in chunk
+
+
+def looks_text_path(target: str) -> bool:
+    """对外暴露给执行层：送模型之前先确认这不是二进制。"""
+    return _looks_text(Path(target))
 
 
 def sha256(target: str, chunk_size: int = 1 << 20) -> str:
@@ -123,23 +155,74 @@ def _walk_stats(path: Path, max_files: int = 5000):
     return file_count, total_size, truncated, ext_counter
 
 
+def _redact(text: str) -> str:
+    return _SECRET_RE.sub("[REDACTED]", text)
+
+
+def is_sensitive_path(target: str) -> bool:
+    """路径是否落在敏感名单里（key / secret / token / .env / config.json / .pem …）。
+
+    本地留存和外发两条路都要问这个函数。第 2 轮审计的 P0 就是：返修只在
+    本地留存那条路上接了它，外发那条一条没接，导致右键「总结」自己的
+    model_config.json 会把明文 key 发给第三方模型。
+    """
+    p = Path(target)
+    return bool(_SENSITIVE_NAME_RE.search(str(p)) or _SENSITIVE_NAME_RE.search(p.name))
+
+
+def redact(text: str) -> tuple[str, int]:
+    """抹掉文本里的凭据形状，返回 (脱敏后文本, 抹掉处数)。"""
+    return _SECRET_RE.subn("[REDACTED]", text)
+
+
+def _read_preview(path: Path, max_lines: int = 30, max_bytes: int = 8192):
+    """读前若干行做预览。默认不开；开了也要脱敏并压到 200 字符。"""
+    if not capture_preview_enabled():
+        return None
+    if is_sensitive_path(str(path)):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read(max_bytes)
+    except OSError:
+        return None
+
+    lines = raw.splitlines()
+    head = "\n".join(lines[:max_lines])
+    head = _redact(head)
+    if len(head) > PREVIEW_MAX_CHARS:
+        head = head[:PREVIEW_MAX_CHARS] + "…（预览已截断）"
+    return len(lines), head
+
+
 def extract(target: str) -> dict:
-    """抽取对象上下文。返回纯 dict，可直接 json 序列化。"""
+    """抽取对象上下文。返回纯 dict，可直接 json 序列化。
+
+    一次 lstat 复用，避免同一路径反复 stat 造成的 TOCTOU 与冗余系统调用。
+    """
     path = Path(target)
-    obj_type = detect(target)
+    stat = None
+    try:
+        stat = os.lstat(str(path)) if os.path.lexists(str(path)) else None
+    except OSError:
+        stat = None
+
+    exists = stat is not None
+    obj_type = detect(target) if exists else "missing"
 
     ctx: dict = {
-        "path": str(path.resolve()) if path.exists() else str(path),
+        "path": str(path.resolve()) if exists else str(path),
         "name": path.name or str(path),
         "type": obj_type,
         "type_label": TYPE_LABEL.get(obj_type, obj_type),
-        "exists": path.exists(),
+        "exists": exists,
     }
 
-    if not path.exists():
+    if not exists:
         return ctx
 
-    if path.is_dir():
+    is_dir = os.path.isdir(str(path))
+    if is_dir:
         count, size, truncated, exts = _walk_stats(path)
         ctx.update({
             "size_bytes": size,
@@ -149,11 +232,6 @@ def extract(target: str) -> dict:
         })
         return ctx
 
-    try:
-        stat = path.stat()
-    except OSError:
-        return ctx
-
     ctx.update({
         "size_bytes": stat.st_size,
         "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
@@ -161,22 +239,10 @@ def extract(target: str) -> dict:
     })
 
     if obj_type in ("code", "text", "document"):
-        head = _read_head(path)
+        head = _read_preview(path)
         if head is not None:
             ctx["line_count"] = head[0]
             ctx["char_count"] = stat.st_size
             ctx["preview"] = head[1]
 
     return ctx
-
-
-def _read_head(path: Path, max_lines: int = 30, max_bytes: int = 8192):
-    """读前若干行做预览。二进制或读取失败返回 None。"""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            raw = fh.read(max_bytes)
-    except OSError:
-        return None
-
-    lines = raw.splitlines()
-    return len(lines), "\n".join(lines[:max_lines])
