@@ -44,10 +44,25 @@ def _allowed(rel: str) -> bool:
     return name in ALLOWED or name.split("/")[-1] in ALLOWED
 
 
+SCAN_EXTS = {".py", ".md", ".json", ".ps1", ".yml", ".yaml", ".txt", ""}
+
+
 def tracked_files() -> list[str]:
+    """优先用 git ls-files；不在 git 仓库里（导出快照、解压的压缩包）就扫目录。
+
+    只依赖 git 的话，脚本在「检查即将发布的 zip」这种场景下会几乎扫不到东西。
+    """
     out = subprocess.run(["git", "ls-files"], cwd=ROOT,
                          capture_output=True, text=True)
-    return [f for f in out.stdout.splitlines() if f.strip()]
+    files = [f for f in out.stdout.splitlines() if f.strip()]
+    if files:
+        return files
+
+    return [
+        str(p.relative_to(ROOT))
+        for p in ROOT.rglob("*")
+        if p.is_file() and p.suffix.lower() in SCAN_EXTS and ".git" not in p.parts
+    ]
 
 
 def main() -> int:
