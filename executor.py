@@ -282,10 +282,11 @@ _TRANSLATE_SYS = (
 _DESCRIBE_SYS = "You are a vision assistant."
 
 
-def _read_for_model(ctx: dict, limit: int = 0) -> tuple[str, int]:
+def _read_for_model(ctx: dict, limit: int = 0) -> tuple[str, int, str]:
     """送模型前的五道闸门：大小、是否纯文本、是否敏感文件、读多少、内容脱敏。
 
-    返回 (正文, 脱敏处数)。
+    返回 (正文, 脱敏处数, 脱敏未覆盖提示)。第三个值是「看起来像 .env 却一条
+    都没抹掉」时的诚实交代——它发生在发送**之后**，不是拦截，别当闸门用。
 
     少了第三道会出真事故：用户右键「总结」自己的凭据或配置文件，明文内容会
     原样发往第三方模型。这类文件往往只有几 KB，体积闸门根本拦不住，
@@ -322,31 +323,36 @@ def _read_for_model(ctx: dict, limit: int = 0) -> tuple[str, int]:
 
     # 不是敏感文件名，内容里也可能夹着凭据，照样抹掉
     raw, redacted = detector.redact(raw)
+    hint = detector.env_shape_hint(raw, redacted)
     if len(raw) >= limit:
         raw += f"\n\n……（已截断至前 {limit} 字符）"
-    return raw, redacted
+    return raw, redacted, hint
 
 
 def _h_summarize(ctx: dict) -> dict:
-    text, redacted = _read_for_model(ctx)
+    text, redacted, hint = _read_for_model(ctx)
     out = model.chat(_SUMMARY_SYS, f"文件：{ctx['name']}\n\n{text}", max_tokens=2000)
     body = f"# 总结：{ctx['name']}\n\n{out}"
     if redacted:
         body += f"\n\n> 发送前已抹掉 {redacted} 处疑似凭据"
+    if hint:
+        body += f"\n\n> {hint}"
     return {"status": "ok", "kind": "model", "clipboard": body,
             "data": {"model": model.load_config().get("model"),
-                     "redacted": redacted, "egress": True}}
+                     "redacted": redacted, "egress": True, "hint": hint}}
 
 
 def _h_translate(ctx: dict) -> dict:
     # 翻译送全文既慢又烧额度，且长输入会诱出推理模型的思考过程，单独压到 3000 字符
-    text, redacted = _read_for_model(ctx, limit=3000)
+    text, redacted, hint = _read_for_model(ctx, limit=3000)
     out = model.chat(_TRANSLATE_SYS, text, max_tokens=3000)
     if redacted:
         out += f"\n\n> 发送前已抹掉 {redacted} 处疑似凭据"
+    if hint:
+        out += f"\n\n> {hint}"
     return {"status": "ok", "kind": "model", "clipboard": out,
             "data": {"model": model.load_config().get("model"),
-                     "redacted": redacted, "egress": True}}
+                     "redacted": redacted, "egress": True, "hint": hint}}
 
 
 def _h_describe(ctx: dict) -> dict:
