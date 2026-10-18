@@ -1,5 +1,7 @@
 # Armory 右键增强 · 通道实现
 
+**English summary.** A Windows Explorer right-click entry point that runs AI actions on whatever you select — summarize, translate, OCR, copy SHA-256, read metadata. The engineering point of this repo is the **channel in the middle** (permission gate → context extraction → action routing → execute → evidence), not the actions themselves: those are just rows in `actions.json`. Python 3.10+, zero third-party packages, MIT.
+
 在 Windows 资源管理器里右键任意对象，直接对它下 AI 命令。
 
 > 右键 → 发送到 → 「Armory · 总结」，选中一份文档，几秒后摘要就在剪贴板里。
